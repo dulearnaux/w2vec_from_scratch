@@ -40,7 +40,6 @@ class Vocab:
         self._token2index = dict(zip(self._vocab.squeeze(),
                                      self._index.squeeze()))
 
-
     def encode_ohe(self, tokens: npt.NDArray[str]):
         """Encodes from tokens to flat OHE vector.
 
@@ -57,6 +56,32 @@ class Vocab:
                 token_mat[:, i] += np.isin(self.vocab, word).astype('float').squeeze()
         return token_mat  # dims: [vocab.size, batch_size]
 
+    def encode_ohe_fast(self, tokens: npt.NDArray[str]):
+        """Encodes from tokens to flat OHE vector.
+
+        Input dims: [Context length - 1, Batch]
+        """
+        # If a word is not in the vocab, it gets ignored.
+        idx = self.encode_idx_fast(tokens)
+        ohe_mat = np.zeros((self.size, tokens.shape[1]))
+
+        for i, batch_idx in enumerate(idx.T):
+            index, counts = np.unique(batch_idx, return_counts=True)
+            ohe_mat[index, i] = counts
+        return ohe_mat  # dims: [vocab.size, batch_size]
+
+
+    def encode_ohe_ignore_dupe(self, tokens: npt.NDArray[str]):
+        """Encodes from tokens to flat OHE vector.
+
+        Input dims: [Context length - 1, Batch]
+        """
+        # If a word is not in the vocab, it gets ignored. Repeated words in the
+        # same context window are also ignored.
+        token_mat = [np.isin(self.vocab, batch, assume_unique=True).astype(
+            'float') for batch in tokens.T]
+        token_mat = np.concatenate(token_mat, axis=1)
+        return token_mat  # dims: [vocab.size, batch_size]
 
     def encode_idx(self, tokens: npt.NDArray[str]):
         """From text tokens to index numbers.
@@ -70,4 +95,15 @@ class Vocab:
         for i, batch in enumerate(tokens.T):
             index_mat[:, i] = np.concatenate([self._index[self.vocab == word] for word in batch])
         return index_mat  # dims -> [window-1, batch_size]
+
+    def encode_idx_fast(self, tokens: npt.NDArray[str]):
+        """From text tokens to index numbers.
+
+        Input dims: [Context length - 1, Batch]
+        """
+        # This should keep repeat tokens in a context window.
+        idx = [[self._token2index[token] for token in batch] for batch in tokens.T]
+        return np.vstack(idx).T  # output shape: [Context length - 1, batch]
+
+
 
