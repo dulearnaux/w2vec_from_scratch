@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 
+import matplotlib.pyplot as plt
 
 def softmax(logits: npt.NDArray) -> npt.NDArray:
     """Input dim: [V, B]"""
@@ -267,6 +268,63 @@ class Cbow:
     def optim_sgd(self, alpha):
         self.params['w2'] -= alpha * self.grads['w2']
         self.params['w1'] -= alpha * self.grads['w1']
+
+    def plot_loss_curve(self, filename=None, ma=100):
+        """Plots loss curve to file. Convenient tracking of training progress."""
+        fig = plt.figure()
+        fig.subplots_adjust(bottom=0.2)  # Remark 1
+        ax = fig.add_subplot(111)
+        y = np.convolve(
+            np.array(self.loss),
+            np.ones(min(len(self.loss), ma)) / min(len(self.loss), ma),
+            'valid')
+        ax.plot(np.arange(len(y)), y, 'blue')
+        # log(1/V) is the neutral untrained error. When all probabilities are equal.
+        ax.hlines(y=-np.log(1 / self.vocab.size), colors='red', xmin=0, xmax=len(y))
+        if filename:
+            plt.savefig(filename, bbox_inches='tight')
+        else:
+            plt.show()
+        plt.close(fig)
+
+    def plot_prediction(self, data, filename=None, target=None,
+                        context=None, top_n=5):
+        """Plots the predicted probabilities of the context and target.
+
+        target: plot probability for the target word, and its context words. If
+            None, a random word will be selected
+
+        top_n: plot top_n probability words as well These will tend to be
+        related to the target word on a trained model.
+        """
+        if target is None or context is None:
+            context, target = data.sample_random()
+            context = np.expand_dims(np.array(context), axis=1)
+        probs = self.forward(context).squeeze()
+        top_n_idx = np.argsort(probs)[-top_n:]
+        top_n_probs = probs[top_n_idx]
+        top_n_labels = self.vocab.vocab[top_n_idx].squeeze()
+        context_idx = self.vocab.encode_idx_fast(np.array(context)).squeeze()
+        context_probs = probs[context_idx]
+        target_prob = probs[np.squeeze(self.vocab.vocab == target)]
+        plot_probs = np.concatenate([target_prob, context_probs, top_n_probs])
+        plot_labels = np.append(np.append(target, context), top_n_labels)
+        plot_colours = ['red' if label == target else 'blue' for label in plot_labels]
+
+        fig = plt.figure()
+        fig.subplots_adjust(bottom=0.2)  # Remark 1
+        ax = fig.add_subplot(111)
+        ax.bar(np.arange(len(plot_probs)), plot_probs, color=plot_colours)
+        ax.set_title(f'target: {target}, context: {context.squeeze().tolist()}')
+        ax.ticklabel_format(style='plain')
+        ax.set_xticks(np.arange(len(plot_probs)))
+        ax.set_xticklabels(plot_labels, rotation=80)
+        if filename:
+            plt.savefig(filename, bbox_inches='tight')
+            plt.close('all')
+        else:
+            plt.show()
+
 
 class Dataloader:
     """Iterator for the train_data object.
