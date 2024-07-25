@@ -4,6 +4,19 @@ import numpy.typing as npt
 
 import numpy as np
 
+
+
+def softmax(logits: npt.NDArray) -> npt.NDArray:
+    """Input dim: [V, B]"""
+    x = logits - logits.max(axis=0)  # max each batch separately
+    exp = np.exp(x)
+    return exp / exp.sum(axis=0)
+
+def cross_entropy(probs: npt.NDArray, actual: npt.NDArray):
+    """Input dim: [V, B]"""
+    # sum across vocab, mean across batch,
+    return -(np.log(probs + 1e-9) * actual).sum(0).mean()
+
 def grouper(iterable, batch_size):
     """Collect data into fixed-length chunks or blocks."""
     args = [iter(iterable)] * batch_size
