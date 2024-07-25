@@ -1,8 +1,14 @@
+import random
 from typing import Sequence, Tuple, List
 import numpy.typing as npt
 
 import numpy as np
 
+def grouper(iterable, batch_size):
+    """Collect data into fixed-length chunks or blocks."""
+    args = [iter(iterable)] * batch_size
+    # Note, zip will discard incomplete batches at the end of iterable.
+    return zip(*args)
 
 
 class Vocab:
