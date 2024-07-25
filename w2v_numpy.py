@@ -3,6 +3,7 @@ from typing import Sequence, Tuple, List
 import numpy.typing as npt
 
 import numpy as np
+import pandas as pd
 
 
 
@@ -43,7 +44,6 @@ class Vocab:
     @property
     def index(self):
         return self._index
-
 
     @property
     def token2index(self):
@@ -125,6 +125,103 @@ class Vocab:
         return np.vstack(idx).T  # output shape: [Context length - 1, batch]
 
 
+class Cbow:
+    """Continuous Bag of Words model from original word2vec paper.
+
+    Efficient Estimation of Word Representations in Vector Space.
+    https://arxiv.org/pdf/1301.3781
+    """
+
+    @property
+    def window(self):
+        # context length. E.g. for window of 5, we use 2 words before and 2
+        # words after.
+        return self._window
+
+    @property
+    def embed_dim(self):
+        # number of embedding dimensions
+        return self._embed_dim
+
+    @property
+    def batch_size(self):
+        # size of batch. This initializes arrays. In some cases, we iterate
+        # through each batch item individually.
+        return self._batch_size
+
+    def __init__(
+            self, vocab: Vocab, embed_dim: int, window: int,
+            batch_size: int, seed=None, skip_gram=None):
+
+        np.random.seed(seed)
+        v = 1 / np.sqrt(vocab.size)
+        d = 1 / np.sqrt(embed_dim)
+        self.params = {
+            'w1': np.random.uniform(-v, +v, size=(embed_dim, vocab.size)),
+            'w2': np.random.uniform(-d, +d, size=(vocab.size, embed_dim))
+        }
+
+        # stats data frame tracks the progress of training.
+        self.stats = pd.DataFrame(
+            columns=[
+                'epoch', 'batch_iters', 'iters', 'time (min)', 'loss', 'alpha'
+            ]).astype({
+                'epoch': 'int', 'batch_iters': 'int', 'iters': 'int',
+                'time (min)': 'float64', 'loss': 'float64', 'alpha': 'float32'
+            })
+        self.loss = []  # history of loss
+        self.epoch = 0
+
+        self._window = window
+        self._embed_dim = embed_dim
+        self._batch_size = batch_size
+        self.vocab = vocab
+        # State variables, used in backprop.
+        self.state = {
+            'context': np.zeros((window-1, batch_size)),
+            'context_ohe': np.zeros((vocab.size, batch_size)),
+            'projection': np.zeros((embed_dim, batch_size)),
+            'logits': np.zeros((vocab.size, batch_size)),
+            'probs': np.zeros((vocab.size, batch_size)),
+        }
+        self.grads = {
+            'w1': np.zeros_like(self.params['w1']),
+            'w2': np.zeros_like(self.params['w2'])
+        }
+
+    def forward(self, context: npt.NDArray) -> npt.NDArray:
+        """Input dim: [N-1, B]."""
+        context_ohe = self.vocab.encode_ohe_fast(context) / (self.window-1)  # [V, B]
+        projection = self.params['w1'] @ context_ohe  # [D,V] @ [V,1] = [D,B]
+        logits = self.params['w2'] @ projection  # [V, D] x [D, 1] = [V, B]
+        probs = softmax(logits)  # [V, B]
+        # Save the forward pass state.
+        self.state['context'] = context
+        self.state['context_ohe'] = context_ohe  # used by self.backward
+        self.state['projection'] = projection
+        self.state['probs'] = probs
+        return probs  # [V, B]
+
+    def backward(self):
+        if self._skip_gram:
+            dlogits = self.state['probs'] - self.state['target_ohe'].mean(2)  # [V,B] - [V,B] = [V,B]
+        else:
+            dlogits = self.state['probs'] - self.state['target_ohe']  # [V,B] - [V,B] = [V,B]
+        self.grads['w2'] = dlogits @ self.state['projection'].T  # [V,B] @ [B,D] = [V,D]
+        dproj = self.params['w2'].T @ dlogits  # [D,V] @ [V,B] = [D,B]
+        self.grads['w1'] = dproj @ self.state['context_ohe'].T  # [D,V] = [D,B] @ [B,V]
+
+    def loss_fn(self, actual: npt.NDArray):
+        self.state['target_str'] = actual
+        self.state['target_ohe'] = self.vocab.encode_ohe_fast(actual)
+            self.state['loss'] = cross_entropy(
+                self.state['probs'], self.state['target_ohe'])
+        return self.state['loss']
+
+    def optim_sgd(self, alpha):
+        self.params['w2'] -= alpha * self.grads['w2']
+        self.params['w1'] -= alpha * self.grads['w1']
+
 class Dataloader:
     """Iterator for the train_data object.
 
@@ -203,4 +300,3 @@ class Dataloader:
             self.len = length
             return length
 
-import random
