@@ -202,6 +202,29 @@ class Cbow:
         self.state['probs'] = probs
         return probs  # [V, B]
 
+
+    def forward_quick(self, context: npt.NDArray[str]):
+        """Equivalent to `forward`, but supposed to be quicker.
+
+        Subsets matrix columns corresponding to input context so that a smaller
+        matrix is used.
+
+        Turns out to be marginally slower than forward when using batch=512, so
+        this method is not used.
+
+        Input dim: [N-1, B]."""
+        context_idx = self.vocab.encode_idx_fast(context)  # [N, B]
+        projection_sub = self.params['w1'][:, context_idx]  # [D, V] -> [D, N, B]
+        projection = projection_sub.mean(axis=1, keepdims=True).squeeze(axis=1)  # [D, N, B] -> [D, B]
+        logits = self.params['w2'] @ projection  # [V, D] x [D, B] = [V, B]
+        probs = softmax(logits)  # [V, B]
+        # Save the forward pass state.
+        self.state['context'] = context
+        self.state['context_ohe'] = self.vocab.encode_ohe_fast(context)  # / (self.window-1)   # used by self.backward
+        self.state['probs'] = probs
+        self.state['projection'] = projection
+        return probs
+
     def backward(self):
         if self._skip_gram:
             dlogits = self.state['probs'] - self.state['target_ohe'].mean(2)  # [V,B] - [V,B] = [V,B]
@@ -211,11 +234,34 @@ class Cbow:
         dproj = self.params['w2'].T @ dlogits  # [D,V] @ [V,B] = [D,B]
         self.grads['w1'] = dproj @ self.state['context_ohe'].T  # [D,V] = [D,B] @ [B,V]
 
+    def backward_quick(self):
+        """Equivalent to backward().
+
+        Speeds up by about 25% for batch_size=512 by operating on relevant
+        columns only.
+        """
+        if self._skip_gram:
+            dlogits = self.state['probs'] - self.state['target_ohe'].mean(2)  # [V,B] - [V,B] = [V,B]
+        else:
+            dlogits = self.state['probs'] - self.state['target_ohe']  # [V,B] - [V,B] = [V,B]
+
+        self.grads['w2'] = dlogits @ self.state['projection'].T  # [V,B] @ [B,D] = [V,D]
+        dproj = self.params['w2'].T @ dlogits  # [D,V] @ [V,B] = [D,B]
+
+        # slice out each batch and insert only the changed w1 values.
+        context_idx = self.vocab.encode_idx_fast(self.state['context'])  # [N-1, B]
+        # Can save 30 microsecs by subseting on context_ohe within the loop.
+        context_reduced = np.take_along_axis(
+            self.state['context_ohe'], context_idx, axis=0)  # [N-1, B]
+        self.grads['w1'] = np.zeros_like(self.grads['w1'])
+        for b in range(self.batch_size):
+            self.grads['w1'][:, context_idx[:, b]] += dproj[:, [b]] @ context_reduced[:, [b]].T
+
     def loss_fn(self, actual: npt.NDArray):
         self.state['target_str'] = actual
         self.state['target_ohe'] = self.vocab.encode_ohe_fast(actual)
-            self.state['loss'] = cross_entropy(
-                self.state['probs'], self.state['target_ohe'])
+        self.state['loss'] = cross_entropy(
+            self.state['probs'], self.state['target_ohe'])
         return self.state['loss']
 
     def optim_sgd(self, alpha):
