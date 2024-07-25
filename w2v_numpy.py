@@ -106,4 +106,82 @@ class Vocab:
         return np.vstack(idx).T  # output shape: [Context length - 1, batch]
 
 
+class Dataloader:
+    """Iterator for the train_data object.
 
+    Generates target token and context tokens around the target word. Each
+    iteration increments along the training_data to generate a context, target
+    pair.
+    """
+
+    def __init__(self, data: Sequence[Sequence[str]], window: int):
+        assert (window - 1) * 0.5 % 1 == 0 and window > 2, f'window must be odd and > 2'
+        self.data = data
+        self.window = int(window)
+        self.line_no = int(0)  # line number the iterator is at.
+        self.win_pad = int((window - 1) / 2)  # padding on either side of target
+        self.idx = self.win_pad  #
+        self.line = self.data[self.line_no]
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        context, target = self._data_sampler()
+        self._index_incrementer()
+        return context, target
+
+    def _data_sampler(self) -> Tuple[List[str], str]:
+        """Generates context and target given an index (idx) to target."""
+        start_idx = int(self.idx - self.win_pad)
+        end_idx = int(self.idx + self.win_pad)
+        window_idx = list(range(start_idx, end_idx + 1))
+        window_idx.remove(self.idx)
+        context = np.array(self.line)[window_idx].tolist()
+        target = self.line[self.idx]
+        return context, target
+
+    def _index_incrementer(self):
+        """Increments to the next index (idx)."""
+        # This will not include partial windows at the beginning and end of
+        # lines.
+        if self.idx + self.win_pad + 1 < len(self.line) - 1:
+            self.idx += 1
+        elif self.line_no < len(self.data) - 1:
+            self.idx = self.win_pad
+            self.line_no += 1
+            self.line = self.data[self.line_no]
+            # if next line is < window length, need to go to next line.
+            while len(self.line) < self.window:
+                self.line_no += 1
+                self.line = self.data[self.line_no]
+        else:
+            raise StopIteration
+
+    def sample_random(self, seed=None):
+        """Returns random target and context words."""
+        random.seed(seed)
+        line = []
+        while len(line) < self.window:
+            line = self.data[random.randint(0, len(self.data))]
+        idx = random.randint(self.win_pad, len(line) - self.win_pad - 1)
+        target = line[idx]
+        context = line[(idx - self.win_pad):(idx + self.win_pad + 1)]
+        context.remove(target)
+        return context, target
+
+    def sample_current(self):
+        """Returns the current values without iterating forward."""
+        return self._data_sampler()
+
+    def __len__(self):
+        if hasattr(self, 'len'):
+            return self.len
+        else:
+            length = 0
+            for line in self.data:
+                length += max(0, (len(line) - self.window + 1))
+            self.len = length
+            return length
+
+import random
