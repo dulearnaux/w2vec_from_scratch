@@ -4,8 +4,6 @@ import numpy.typing as npt
 
 import numpy as np
 import pandas as pd
-
-
 import matplotlib.pyplot as plt
 
 def softmax(logits: npt.NDArray) -> npt.NDArray:
@@ -18,6 +16,17 @@ def cross_entropy(probs: npt.NDArray, actual: npt.NDArray):
     """Input dim: [V, B]"""
     # sum across vocab, mean across batch,
     return -(np.log(probs + 1e-9) * actual).sum(0).mean()
+
+def cross_entropy_sgram(probs: npt.NDArray, actual: npt.NDArray):
+    """Input dim: [V, B], [V, B, N-1]"""
+    # Sgram has an extra dim in the output as each context word in output has
+    # its own OHE.
+    loss = []
+    for i in range(actual.shape[2]):
+        # sum across vocab, mean across batch, for each output OHE.
+        loss.append(-(np.log(probs + 1e-9) * actual[:, :, i]).sum(0).mean())
+    return np.array(loss).mean()
+
 
 def grouper(iterable, batch_size):
     """Collect data into fixed-length chunks or blocks."""
@@ -129,6 +138,16 @@ class Vocab:
 class Cbow:
     """Continuous Bag of Words model from original word2vec paper.
 
+    To run the Skip gram model, set skip_gram=True, and simply pass the target
+    as input, and context into the loss function.
+
+    E.g.  CBOW                  Skip Gram
+    cbow = Cbow(...)            sgram = Cbow(..., skip_gram=True)
+    cbow.forward(context)       sgram.forward(target)
+    cbow.loss(target)           sgram.loss(context)
+    cbow.backward()             sgram.backward()
+    cbow.optim_sgd(alpha)       sgram.optim_sgd(alpha)
+
     Efficient Estimation of Word Representations in Vector Space.
     https://arxiv.org/pdf/1301.3781
     """
@@ -153,6 +172,10 @@ class Cbow:
     def __init__(
             self, vocab: Vocab, embed_dim: int, window: int,
             batch_size: int, seed=None, skip_gram=None):
+
+        # Code for CBOW and skip gram is mostly the same. But in a few places we
+        # need to do things differently if it's a skip gram model.
+        self._skip_gram = skip_gram
 
         np.random.seed(seed)
         v = 1 / np.sqrt(vocab.size)
@@ -261,8 +284,12 @@ class Cbow:
     def loss_fn(self, actual: npt.NDArray):
         self.state['target_str'] = actual
         self.state['target_ohe'] = self.vocab.encode_ohe_fast(actual)
-        self.state['loss'] = cross_entropy(
-            self.state['probs'], self.state['target_ohe'])
+        if self._skip_gram:
+            self.state['loss'] = cross_entropy_sgram(
+                self.state['probs'], self.state['target_ohe'])
+        else:
+            self.state['loss'] = cross_entropy(
+                self.state['probs'], self.state['target_ohe'])
         return self.state['loss']
 
     def optim_sgd(self, alpha):
