@@ -22,6 +22,7 @@ if __name__ == '__main__':
 
     vocab = w2v_numpy.Vocab(train_data)
     cbow = w2v_numpy.Cbow(vocab, VECTOR_DIM, window, batch, 1)
+    sgram = w2v_numpy.Sgram(vocab, VECTOR_DIM, window, batch, 1)
     data = w2v_numpy.Dataloader(train_data, cbow.window)
 
     batched_data = w2v_numpy.grouper(data, batch)
@@ -63,8 +64,9 @@ if __name__ == '__main__':
     tmp = timeit.Timer('next(test_data)', globals=globals()).repeat(1, 1000)
     print(f'Dataloader iteration:{tmp[0] / 1000:.3}s per iter')
 
-    # test forward speed. Requires context.
-    print('\nTesting forward, backward, loss and opt speed:')
+    # CBOW tests
+    # test CBOW forward speed. Requires context.
+    print('\nCBOW - Testing forward, backward, loss and opt speed:')
     cbow = w2v_numpy.Cbow(vocab, VECTOR_DIM, window, batch, seed=1)
     tmp = timeit.Timer('cbow.forward(context)', globals=globals()).repeat(1, 10)
     print(f'forward:{tmp[0] / 10:.3}s per run')
@@ -95,3 +97,38 @@ if __name__ == '__main__':
     print(f'{'passed' if tmp else 'failed'}: cbow.backward_quick dw1 == cbow.backward dw1')
     tmp = np.allclose(grads_quick['w2'], grads['w2'])
     print(f'{'passed' if tmp else 'failed'}: cbow.backward_quick dw2 == cbow.backward dw2')
+
+
+    # S-gram tests
+    # tests S-gram forward speed. Requires context.
+    print('\nS-gram - Testing forward, backward, loss and opt speed:')
+    sgram = w2v_numpy.Sgram(vocab, VECTOR_DIM, window, batch, seed=1)
+    tmp = timeit.Timer('sgram.forward(target)', globals=globals()).repeat(1, 10)
+    print(f'forward:{tmp[0] / 10:.3}s per run')
+    tmp = timeit.Timer('sgram.forward_quick(target)', globals=globals()).repeat(1, 10)
+    print(f'forward_quick:{tmp[0] / 10:.3}s per run')
+    tmp = timeit.Timer('sgram.loss_fn(context)', globals=globals()).repeat(1, 10)
+    print(f'loss_fn:{tmp[0] / 10:.3}s per run')
+    tmp = timeit.Timer('sgram.backward()', globals=globals()).repeat(1, 10)
+    print(f'backward:{tmp[0] / 10:.3}s per run')
+    tmp = timeit.Timer('sgram.backward_quick()', globals=globals()).repeat(1, 10)
+    print(f'backward_quick:{tmp[0] / 10:.3}s per run')
+    tmp = timeit.Timer('sgram.optim_sgd(0.00001)', globals=globals()).repeat(1, 10)
+    print(f'optim_sgd:{tmp[0] / 10:.3}s per run')
+    print('\n')
+
+    print('Testing equality of output of forward and backward algos')
+    tmp = np.allclose(sgram.forward(context), sgram.forward_quick(context))
+    print(f'{'passed' if tmp else 'failed'}: sgram.forward_quick == sgram.forward ')
+
+    # create w1 and w1 gradients
+    sgram.forward(context)
+    sgram.loss_fn(target)
+    sgram.backward_quick()
+    grads_quick = sgram.grads
+    sgram.backward()
+    grads = sgram.grads
+    tmp = np.allclose(grads_quick['w1'], grads['w1'])
+    print(f'{'passed' if tmp else 'failed'}: sgram.backward_quick dw1 == sgram.backward dw1')
+    tmp = np.allclose(grads_quick['w2'], grads['w2'])
+    print(f'{'passed' if tmp else 'failed'}: sgram.backward_quick dw2 == sgram.backward dw2')

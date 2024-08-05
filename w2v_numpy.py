@@ -12,22 +12,6 @@ def softmax(logits: npt.NDArray) -> npt.NDArray:
     exp = np.exp(x)
     return exp / exp.sum(axis=0)
 
-def cross_entropy(probs: npt.NDArray, actual: npt.NDArray):
-    """Input dim: [V, B]"""
-    # sum across vocab, mean across batch,
-    return -(np.log(probs + 1e-9) * actual).sum(0).mean()
-
-def cross_entropy_sgram(probs: npt.NDArray, actual: npt.NDArray):
-    """Input dim: [V, B], [V, B, N-1]"""
-    # Sgram has an extra dim in the output as each context word in output has
-    # its own OHE.
-    loss = []
-    for i in range(actual.shape[2]):
-        # sum across vocab, mean across batch, for each output OHE.
-        loss.append(-(np.log(probs + 1e-9) * actual[:, :, i]).sum(0).mean())
-    return np.array(loss).mean()
-
-
 def grouper(iterable, batch_size):
     """Collect data into fixed-length chunks or blocks."""
     args = [iter(iterable)] * batch_size
@@ -88,7 +72,7 @@ class Vocab:
     def encode_ohe_fast(self, tokens: npt.NDArray[str]):
         """Encodes from tokens to flat OHE vector.
 
-        Input dims: [Context length - 1, Batch]
+        Input dims: [Context length - 1, Batch, 1]
         """
         # If a word is not in the vocab, it gets ignored.
         idx = self.encode_idx_fast(tokens)
@@ -133,224 +117,6 @@ class Vocab:
         # This should keep repeat tokens in a context window.
         idx = [[self._token2index[token] for token in batch] for batch in tokens.T]
         return np.vstack(idx).T  # output shape: [Context length - 1, batch]
-
-
-class Cbow:
-    """Continuous Bag of Words model from original word2vec paper.
-
-    To run the Skip gram model, set skip_gram=True, and simply pass the target
-    as input, and context into the loss function.
-
-    E.g.  CBOW                  Skip Gram
-    cbow = Cbow(...)            sgram = Cbow(..., skip_gram=True)
-    cbow.forward(context)       sgram.forward(target)
-    cbow.loss(target)           sgram.loss(context)
-    cbow.backward()             sgram.backward()
-    cbow.optim_sgd(alpha)       sgram.optim_sgd(alpha)
-
-    Efficient Estimation of Word Representations in Vector Space.
-    https://arxiv.org/pdf/1301.3781
-    """
-
-    @property
-    def window(self):
-        # context length. E.g. for window of 5, we use 2 words before and 2
-        # words after.
-        return self._window
-
-    @property
-    def embed_dim(self):
-        # number of embedding dimensions
-        return self._embed_dim
-
-    @property
-    def batch_size(self):
-        # size of batch. This initializes arrays. In some cases, we iterate
-        # through each batch item individually.
-        return self._batch_size
-
-    def __init__(
-            self, vocab: Vocab, embed_dim: int, window: int,
-            batch_size: int, seed=None, skip_gram=None):
-
-        # Code for CBOW and skip gram is mostly the same. But in a few places we
-        # need to do things differently if it's a skip gram model.
-        self._skip_gram = skip_gram
-
-        np.random.seed(seed)
-        v = 1 / np.sqrt(vocab.size)
-        d = 1 / np.sqrt(embed_dim)
-        self.params = {
-            'w1': np.random.uniform(-v, +v, size=(embed_dim, vocab.size)),
-            'w2': np.random.uniform(-d, +d, size=(vocab.size, embed_dim))
-        }
-
-        # stats data frame tracks the progress of training.
-        self.stats = pd.DataFrame(
-            columns=[
-                'epoch', 'batch_iters', 'iters', 'time (min)', 'loss', 'alpha'
-            ]).astype({
-                'epoch': 'int', 'batch_iters': 'int', 'iters': 'int',
-                'time (min)': 'float64', 'loss': 'float64', 'alpha': 'float32'
-            })
-        self.loss = []  # history of loss
-        self.epoch = 0
-
-        self._window = window
-        self._embed_dim = embed_dim
-        self._batch_size = batch_size
-        self.vocab = vocab
-        # State variables, used in backprop.
-        self.state = {
-            'context': np.zeros((window-1, batch_size)),
-            'context_ohe': np.zeros((vocab.size, batch_size)),
-            'projection': np.zeros((embed_dim, batch_size)),
-            'logits': np.zeros((vocab.size, batch_size)),
-            'probs': np.zeros((vocab.size, batch_size)),
-        }
-        self.grads = {
-            'w1': np.zeros_like(self.params['w1']),
-            'w2': np.zeros_like(self.params['w2'])
-        }
-
-    def forward(self, context: npt.NDArray) -> npt.NDArray:
-        """Input dim: [N-1, B]."""
-        context_ohe = self.vocab.encode_ohe_fast(context) / (self.window-1)  # [V, B]
-        projection = self.params['w1'] @ context_ohe  # [D,V] @ [V,1] = [D,B]
-        logits = self.params['w2'] @ projection  # [V, D] x [D, 1] = [V, B]
-        probs = softmax(logits)  # [V, B]
-        # Save the forward pass state.
-        self.state['context'] = context
-        self.state['context_ohe'] = context_ohe  # used by self.backward
-        self.state['projection'] = projection
-        self.state['probs'] = probs
-        return probs  # [V, B]
-
-
-    def forward_quick(self, context: npt.NDArray[str]):
-        """Equivalent to `forward`, but supposed to be quicker.
-
-        Subsets matrix columns corresponding to input context so that a smaller
-        matrix is used.
-
-        Turns out to be marginally slower than forward when using batch=512, so
-        this method is not used.
-
-        Input dim: [N-1, B]."""
-        context_idx = self.vocab.encode_idx_fast(context)  # [N, B]
-        projection_sub = self.params['w1'][:, context_idx]  # [D, V] -> [D, N, B]
-        projection = projection_sub.mean(axis=1, keepdims=True).squeeze(axis=1)  # [D, N, B] -> [D, B]
-        logits = self.params['w2'] @ projection  # [V, D] x [D, B] = [V, B]
-        probs = softmax(logits)  # [V, B]
-        # Save the forward pass state.
-        self.state['context'] = context
-        self.state['context_ohe'] = self.vocab.encode_ohe_fast(context)  # / (self.window-1)   # used by self.backward
-        self.state['probs'] = probs
-        self.state['projection'] = projection
-        return probs
-
-    def backward(self):
-        if self._skip_gram:
-            dlogits = self.state['probs'] - self.state['target_ohe'].mean(2)  # [V,B] - [V,B] = [V,B]
-        else:
-            dlogits = self.state['probs'] - self.state['target_ohe']  # [V,B] - [V,B] = [V,B]
-        self.grads['w2'] = dlogits @ self.state['projection'].T  # [V,B] @ [B,D] = [V,D]
-        dproj = self.params['w2'].T @ dlogits  # [D,V] @ [V,B] = [D,B]
-        self.grads['w1'] = dproj @ self.state['context_ohe'].T  # [D,V] = [D,B] @ [B,V]
-
-    def backward_quick(self):
-        """Equivalent to backward().
-
-        Speeds up by about 25% for batch_size=512 by operating on relevant
-        columns only.
-        """
-        if self._skip_gram:
-            dlogits = self.state['probs'] - self.state['target_ohe'].mean(2)  # [V,B] - [V,B] = [V,B]
-        else:
-            dlogits = self.state['probs'] - self.state['target_ohe']  # [V,B] - [V,B] = [V,B]
-
-        self.grads['w2'] = dlogits @ self.state['projection'].T  # [V,B] @ [B,D] = [V,D]
-        dproj = self.params['w2'].T @ dlogits  # [D,V] @ [V,B] = [D,B]
-
-        # slice out each batch and insert only the changed w1 values.
-        context_idx = self.vocab.encode_idx_fast(self.state['context'])  # [N-1, B]
-        # Can save 30 microsecs by subseting on context_ohe within the loop.
-        context_reduced = np.take_along_axis(
-            self.state['context_ohe'], context_idx, axis=0)  # [N-1, B]
-        self.grads['w1'] = np.zeros_like(self.grads['w1'])
-        for b in range(self.batch_size):
-            self.grads['w1'][:, context_idx[:, b]] += dproj[:, [b]] @ context_reduced[:, [b]].T
-
-    def loss_fn(self, actual: npt.NDArray):
-        self.state['target_str'] = actual
-        self.state['target_ohe'] = self.vocab.encode_ohe_fast(actual)
-        if self._skip_gram:
-            self.state['loss'] = cross_entropy_sgram(
-                self.state['probs'], self.state['target_ohe'])
-        else:
-            self.state['loss'] = cross_entropy(
-                self.state['probs'], self.state['target_ohe'])
-        return self.state['loss']
-
-    def optim_sgd(self, alpha):
-        self.params['w2'] -= alpha * self.grads['w2']
-        self.params['w1'] -= alpha * self.grads['w1']
-
-    def plot_loss_curve(self, filename=None, ma=100):
-        """Plots loss curve to file. Convenient tracking of training progress."""
-        fig = plt.figure()
-        fig.subplots_adjust(bottom=0.2)  # Remark 1
-        ax = fig.add_subplot(111)
-        y = np.convolve(
-            np.array(self.loss),
-            np.ones(min(len(self.loss), ma)) / min(len(self.loss), ma),
-            'valid')
-        ax.plot(np.arange(len(y)), y, 'blue')
-        # log(1/V) is the neutral untrained error. When all probabilities are equal.
-        ax.hlines(y=-np.log(1 / self.vocab.size), colors='red', xmin=0, xmax=len(y))
-        if filename:
-            plt.savefig(filename, bbox_inches='tight')
-        else:
-            plt.show()
-        plt.close(fig)
-
-    def plot_prediction(self, data, filename=None, target=None,
-                        context=None, top_n=5):
-        """Plots the predicted probabilities of the context and target.
-
-        target: plot probability for the target word, and its context words. If
-            None, a random word will be selected
-
-        top_n: plot top_n probability words as well These will tend to be
-        related to the target word on a trained model.
-        """
-        if target is None or context is None:
-            context, target = data.sample_random()
-            context = np.expand_dims(np.array(context), axis=1)
-        probs = self.forward(context).squeeze()
-        top_n_idx = np.argsort(probs)[-top_n:]
-        top_n_probs = probs[top_n_idx]
-        top_n_labels = self.vocab.vocab[top_n_idx].squeeze()
-        context_idx = self.vocab.encode_idx_fast(np.array(context)).squeeze()
-        context_probs = probs[context_idx]
-        target_prob = probs[np.squeeze(self.vocab.vocab == target)]
-        plot_probs = np.concatenate([target_prob, context_probs, top_n_probs])
-        plot_labels = np.append(np.append(target, context), top_n_labels)
-        plot_colours = ['red' if label == target else 'blue' for label in plot_labels]
-
-        fig = plt.figure()
-        fig.subplots_adjust(bottom=0.2)  # Remark 1
-        ax = fig.add_subplot(111)
-        ax.bar(np.arange(len(plot_probs)), plot_probs, color=plot_colours)
-        ax.set_title(f'target: {target}, context: {context.squeeze().tolist()}')
-        ax.ticklabel_format(style='plain')
-        ax.set_xticks(np.arange(len(plot_probs)))
-        ax.set_xticklabels(plot_labels, rotation=80)
-        if filename:
-            plt.savefig(filename, bbox_inches='tight')
-            plt.close('all')
-        else:
-            plt.show()
 
 
 class Dataloader:
@@ -430,4 +196,249 @@ class Dataloader:
                 length += max(0, (len(line) - self.window + 1))
             self.len = length
             return length
+
+
+class Cbow:
+    """Continuous Bag of Words model from original word2vec paper.
+
+    To run the Skip gram model, use the Sgram class and pass the target as input
+    and context into the loss function.
+
+    E.g.  CBOW                  Skip Gram
+    cbow = Cbow(...)            sgram = Sgram(...)
+    cbow.forward(context)       sgram.forward(target)
+    cbow.loss(target)           sgram.loss(context)
+    cbow.backward()             sgram.backward()
+    cbow.optim_sgd(alpha)       sgram.optim_sgd(alpha)
+
+    Efficient Estimation of Word Representations in Vector Space.
+    https://arxiv.org/pdf/1301.3781
+    """
+
+    @property
+    def window(self):
+        # context length. E.g. for window of 5, we use 2 words before and 2
+        # words after.
+        return self._window
+
+    @property
+    def embed_dim(self):
+        # number of embedding dimensions
+        return self._embed_dim
+
+    @property
+    def batch_size(self):
+        # size of batch. This initializes arrays. In some cases, we iterate
+        # through each batch item individually.
+        return self._batch_size
+
+    def __init__(
+            self, vocab: Vocab, embed_dim: int, window: int,
+            batch_size: int, seed=None):
+
+        np.random.seed(seed)
+        v = 1 / np.sqrt(vocab.size)
+        d = 1 / np.sqrt(embed_dim)
+        self.params = {
+            'w1': np.random.uniform(-v, +v, size=(embed_dim, vocab.size)),
+            'w2': np.random.uniform(-d, +d, size=(vocab.size, embed_dim))
+        }
+
+        # stats data frame tracks the progress of training.
+        self.stats = pd.DataFrame(
+            columns=[
+                'epoch', 'batch_iters', 'iters', 'time (min)', 'loss', 'alpha'
+            ]).astype({
+                'epoch': 'int', 'batch_iters': 'int', 'iters': 'int',
+                'time (min)': 'float64', 'loss': 'float64', 'alpha': 'float32'
+            })
+        self.loss = []  # history of loss
+        self.epoch = 0
+
+        self._window = window
+        self._embed_dim = embed_dim
+        self._batch_size = batch_size
+        self.vocab = vocab
+        # State variables, used in backprop.
+        self.state = {
+            'context': np.zeros((window-1, batch_size)),
+            'context_ohe': np.zeros((vocab.size, batch_size)),
+            'projection': np.zeros((embed_dim, batch_size)),
+            'logits': np.zeros((vocab.size, batch_size)),
+            'probs': np.zeros((vocab.size, batch_size)),
+        }
+        self.grads = {
+            'w1': np.zeros_like(self.params['w1']),
+            'w2': np.zeros_like(self.params['w2'])
+        }
+
+    def forward(self, context: npt.NDArray) -> npt.NDArray:
+        """Input dim: [N-1, B]."""
+        context_ohe = self.vocab.encode_ohe_fast(context) / (self.window-1)  # [V, B]
+        projection = self.params['w1'] @ context_ohe  # [D,V] @ [V,1] = [D,B]
+        logits = self.params['w2'] @ projection  # [V, D] x [D, 1] = [V, B]
+        probs = softmax(logits)  # [V, B]
+        # Save the forward pass state.
+        self.state['context'] = context
+        self.state['context_ohe'] = context_ohe  # used by self.backward
+        self.state['projection'] = projection
+        self.state['probs'] = probs
+        return probs  # [V, B]
+
+    def _calc_dlogits(self):
+        """dlogits calculation differs for S-gram and Cbow."""
+        # CBOW implementation of dlogits.
+        return self.state['probs'] - self.state['target_ohe']  # [V,B] - [V,B] = [V,B]
+
+    def backward(self):
+        # dlogits calculation is abstracted out as it differs slightly for CBOW
+        # and S-gram.
+        dlogits = self._calc_dlogits()
+        self.grads['w2'] = dlogits @ self.state['projection'].T  # [V,B] @ [B,D] = [V,D]
+        dproj = self.params['w2'].T @ dlogits  # [D,V] @ [V,B] = [D,B]
+        self.grads['w1'] = dproj @ self.state['context_ohe'].T  # [D,V] = [D,B] @ [B,V]
+
+    def cross_entropy(self):
+        """Cross entropy loss differs for S-gram and CBOW."""
+        # sum across vocab [V], mean across batch [B],
+        return -(np.log(self.state['probs'] + 1e-9) * self.state['target_ohe']).sum(0).mean()
+
+    def loss_fn(self, actual: npt.NDArray):
+        """Loss function differes for CBOW and S-gram"""
+        # Cbow input dims: [1, B]
+        self.state['target_str'] = actual
+        self.state['target_ohe'] = self.vocab.encode_ohe_fast(actual)
+        self.state['loss'] = self.cross_entropy()
+        return self.state['loss']
+
+    def optim_sgd(self, alpha):
+        self.params['w2'] -= alpha * self.grads['w2']
+        self.params['w1'] -= alpha * self.grads['w1']
+
+    def forward_quick(self, context: npt.NDArray[str]):
+        """Equivalent to `forward`, but supposed to be quicker.
+
+        Subsets matrix columns corresponding to input context so that a smaller
+        matrix is used.
+
+        Turns out to be marginally slower than forward when using batch=512, so
+        this method is not used.
+
+        Input dim: [N-1, B]."""
+        context_idx = self.vocab.encode_idx_fast(context)  # [N, B]
+        projection_sub = self.params['w1'][:, context_idx]  # [D, V] -> [D, N, B]
+        projection = projection_sub.mean(axis=1, keepdims=True).squeeze(axis=1)  # [D, N, B] -> [D, B]
+        logits = self.params['w2'] @ projection  # [V, D] x [D, B] = [V, B]
+        probs = softmax(logits)  # [V, B]
+        # Save the forward pass state.
+        self.state['context'] = context
+        self.state['context_ohe'] = self.vocab.encode_ohe_fast(context)  # / (self.window-1)   # used by self.backward
+        self.state['probs'] = probs
+        self.state['projection'] = projection
+        return probs
+
+    def backward_quick(self):
+        """Equivalent to backward().
+
+        Speeds up by about 25% for batch_size=512 by operating on relevant
+        columns only.
+        """
+        dlogits = self._calc_dlogits()
+        self.grads['w2'] = dlogits @ self.state['projection'].T  # [V,B] @ [B,D] = [V,D]
+        dproj = self.params['w2'].T @ dlogits  # [D,V] @ [V,B] = [D,B]
+
+        # slice out each batch and insert only the changed w1 values.
+        context_idx = self.vocab.encode_idx_fast(self.state['context'])  # [N-1, B]
+        # Can save 30 microsecs by subseting on context_ohe within the loop.
+        context_reduced = np.take_along_axis(
+            self.state['context_ohe'], context_idx, axis=0)  # [N-1, B]
+        self.grads['w1'] = np.zeros_like(self.grads['w1'])
+        for b in range(self.batch_size):
+            self.grads['w1'][:, context_idx[:, b]] += dproj[:, [b]] @ context_reduced[:, [b]].T
+
+    def plot_loss_curve(self, filename=None, ma=100):
+        """Plots loss curve to file. Convenient tracking of training progress."""
+        fig = plt.figure()
+        fig.subplots_adjust(bottom=0.2)  # Remark 1
+        ax = fig.add_subplot(111)
+        y = np.convolve(
+            np.array(self.loss),
+            np.ones(min(len(self.loss), ma)) / min(len(self.loss), ma),
+            'valid')
+        ax.plot(np.arange(len(y)), y, 'blue')
+        # log(1/V) is the neutral untrained error. When all probabilities are equal.
+        ax.hlines(y=-np.log(1 / self.vocab.size), colors='red', xmin=0, xmax=len(y))
+        if filename:
+            plt.savefig(filename, bbox_inches='tight')
+        else:
+            plt.show()
+        plt.close(fig)
+
+    def plot_prediction(self, data, filename=None, target=None,
+                        context=None, top_n=5):
+        """Plots the predicted probabilities of the context and target.
+
+        target: plot probability for the target word, and its context words. If
+            None, a random word will be selected
+
+        top_n: plot top_n probability words as well These will tend to be
+        related to the target word on a trained model.
+        """
+        if target is None or context is None:
+            context, target = data.sample_random()
+            context = np.expand_dims(np.array(context), axis=1)
+        probs = self.forward(context).squeeze()
+        top_n_idx = np.argsort(probs)[-top_n:]
+        top_n_probs = probs[top_n_idx]
+        top_n_labels = self.vocab.vocab[top_n_idx].squeeze()
+        context_idx = self.vocab.encode_idx_fast(np.array(context)).squeeze()
+        context_probs = probs[context_idx]
+        target_prob = probs[np.squeeze(self.vocab.vocab == target)]
+        plot_probs = np.concatenate([target_prob, context_probs, top_n_probs])
+        plot_labels = np.append(np.append(target, context), top_n_labels)
+        plot_colours = ['red' if label == target else 'blue' for label in plot_labels]
+
+        fig = plt.figure()
+        fig.subplots_adjust(bottom=0.2)  # Remark 1
+        ax = fig.add_subplot(111)
+        ax.bar(np.arange(len(plot_probs)), plot_probs, color=plot_colours)
+        ax.set_title(f'target: {target}, context: {context.squeeze().tolist()}')
+        ax.ticklabel_format(style='plain')
+        ax.set_xticks(np.arange(len(plot_probs)))
+        ax.set_xticklabels(plot_labels, rotation=80)
+        if filename:
+            plt.savefig(filename, bbox_inches='tight')
+            plt.close('all')
+        else:
+            plt.show()
+
+
+class Sgram(Cbow):
+
+    def _calc_dlogits(self):
+        """dlogits calculation differs for S-gram and Cbow."""
+        # For Sgram we have to mean across all the output context words.
+        return self.state['probs'] - self.state['target_ohe'].mean(2)  # [V,B] - [V,B] = [V,B]
+
+    def cross_entropy(self):
+        """Cross entropy loss differs for S-gram and CBOW."""
+        # Sgram has an extra dim in the output as each context word in output\
+        # has its own OHE.
+        # dims: probs: [V, B], target_ohe: [V, B, N - 1]
+        loss = []
+        for i in range(self.state['target_ohe'].shape[2]):
+            # sum across vocab, mean across batch, for each output OHE.
+            loss.append(-(np.log(self.state['probs'] + 1e-9) * self.state['target_ohe'][:, :, i]).sum(0).mean())
+        return np.array(loss).mean()
+
+    def loss_fn(self, actual: npt.NDArray):
+        """Input dim for Sgram: [N-1, B]"""
+        self.state['target_str'] = actual
+        ohe_target = []
+        # iterate across each context word.
+        for i, c in enumerate(actual):
+            ohe_target.append(self.vocab.encode_ohe_fast(np.expand_dims(c, axis=0)))
+        self.state['target_ohe'] = np.stack(ohe_target, axis=2)
+        self.state['loss'] = self.cross_entropy()
+        return self.state['loss']
 
