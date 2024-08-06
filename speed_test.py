@@ -8,7 +8,10 @@ import w2v_numpy
 
 if __name__ == '__main__':
     """Script tests speed of methods and checks equivalence of regular and
-    optimized methods."""
+    optimized methods.
+    
+    This was used to guide performance improvements of some bottleneck methods.
+    """
     VECTOR_DIM = 300
     BASE_DIR = Path(__file__).parent
     DATA_FILE = BASE_DIR / 'data/toy_data_41mb_raw.txt.train'
@@ -33,9 +36,33 @@ if __name__ == '__main__':
     cbow = w2v_numpy.Cbow(vocab, VECTOR_DIM, window, batch, seed=1)
 
     # Requires context and vocab
-    print('\nTesting Encoding Speed from token to OHE vector: Vocab.encod_ohe...')
-    tmp = timeit.Timer('vocab.encode_ohe_ignore_dupe(context)', globals=globals()).repeat(1, 10)
-    print(f'encode_ohe_ignore_dupe:{tmp[0]/10:.3}s per run')
+    print('\nTesting Encoding Speed from token to OHE vector on target: Vocab.encod_ohe...')
+    tmp = timeit.Timer('vocab.encode_ohe(target)', globals=globals()).repeat(1, 10)
+    print(f'encode_ohe:{tmp[0] / 10:.3}s per run')
+    tmp = timeit.Timer('vocab.encode_ohe_fast(target)', globals=globals()).repeat(1, 100)
+    print(f'encode_ohe_fast:{tmp[0] / 100:.3}s per run')
+    tmp = timeit.Timer('vocab.encode_ohe_fast_single_word(target)', globals=globals()).repeat(1, 100)
+    print(f'encode_ohe_fast_single_word:{tmp[0] / 100:.3}s per run')
+    print('\n')
+
+    print('Testing Encoding from token to index number: Vocab.encod_idx...')
+    tmp = timeit.Timer('vocab.encode_idx(target)', globals=globals()).repeat(1, 10)
+    print(f'encode_idx:{tmp[0] / 10:.3}s per run')
+    tmp = timeit.Timer('vocab.encode_idx_fast(target)', globals=globals()).repeat(1, 100)
+    print(f'encode_idx_fast:{tmp[0] / 100:.3}s per run')
+    print('\n')
+
+    print('Testing equality of output of encoding algos')
+    tmp = np.array_equal(vocab.encode_ohe(target), vocab.encode_ohe_fast(target))
+    print(f'{'passed' if tmp else 'failed'}: encode_ohe == encode_ohe_fast')
+    tmp = np.array_equal(vocab.encode_idx(target), vocab.encode_idx_fast(target))
+    print(f'{'passed' if tmp else 'failed'}: encode_idx == encode_idx_fast')
+    tmp = np.array_equal(vocab.encode_ohe_fast_single_word(target), vocab.encode_ohe_fast(target))
+    print(f'{'passed' if tmp else 'failed'}: encode_ohe_fast_single_word == encode_ohe')
+    print('\n')
+
+    # Requires context and vocab
+    print('\nTesting Encoding Speed from token to OHE vector on context: Vocab.encod_ohe...')
     tmp = timeit.Timer('vocab.encode_ohe(context)', globals=globals()).repeat(1, 10)
     print(f'encode_ohe:{tmp[0] / 10:.3}s per run')
     tmp = timeit.Timer('vocab.encode_ohe_fast(context)', globals=globals()).repeat(1, 100)
@@ -54,8 +81,6 @@ if __name__ == '__main__':
     print(f'{'passed' if tmp else 'failed'}: encode_ohe == encode_ohe_fast')
     tmp = np.array_equal(vocab.encode_idx(context), vocab.encode_idx_fast(context))
     print(f'{'passed' if tmp else 'failed'}: encode_idx == encode_idx_fast')
-    tmp = np.array_equal(vocab.encode_ohe_ignore_dupe(context), vocab.encode_ohe_fast(context))
-    print(f'{'passed' if not tmp else 'failed'}: encode_ohe_ignore_dupe != encode_ohe')
     print('\n')
 
     # test dataloader

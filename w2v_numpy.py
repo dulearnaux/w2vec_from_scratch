@@ -6,11 +6,13 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+
 def softmax(logits: npt.NDArray) -> npt.NDArray:
     """Input dim: [V, B]"""
     x = logits - logits.max(axis=0)  # max each batch separately
     exp = np.exp(x)
     return exp / exp.sum(axis=0)
+
 
 def grouper(iterable, batch_size):
     """Collect data into fixed-length chunks or blocks."""
@@ -53,6 +55,19 @@ class Vocab:
         self._token2index = dict(zip(self._vocab.squeeze(),
                                      self._index.squeeze()))
 
+    def encode_idx(self, tokens: npt.NDArray[str]):
+        """From text tokens to index numbers.
+
+        Input dims: [Context length - 1, Batch]
+        """
+        # If a word is not in the vocab, it gets ignored.
+        # Need to iterate through tokens to handle repeated words within
+        # a batch.
+        index_mat = np.zeros(tokens.shape, dtype=self._index.dtype)
+        for i, batch in enumerate(tokens.T):
+            index_mat[:, i] = np.concatenate([self._index[self.vocab == word] for word in batch])
+        return index_mat  # dims -> [window-1, batch_size]
+
     def encode_ohe(self, tokens: npt.NDArray[str]):
         """Encodes from tokens to flat OHE vector.
 
@@ -72,42 +87,36 @@ class Vocab:
     def encode_ohe_fast(self, tokens: npt.NDArray[str]):
         """Encodes from tokens to flat OHE vector.
 
-        Input dims: [Context length - 1, Batch, 1]
+        Input dims:
+            cbow.forward: [N-1, B]
+            sgram.forward: [1, B]
         """
         # If a word is not in the vocab, it gets ignored.
         idx = self.encode_idx_fast(tokens)
         ohe_mat = np.zeros((self.size, tokens.shape[1]))
-
         for i, batch_idx in enumerate(idx.T):
             index, counts = np.unique(batch_idx, return_counts=True)
             ohe_mat[index, i] = counts
         return ohe_mat  # dims: [vocab.size, batch_size]
 
-
-    def encode_ohe_ignore_dupe(self, tokens: npt.NDArray[str]):
+    def encode_ohe_fast_single_word(self, tokens: npt.NDArray[str]):
         """Encodes from tokens to flat OHE vector.
 
-        Input dims: [Context length - 1, Batch]
-        """
-        # If a word is not in the vocab, it gets ignored. Repeated words in the
-        # same context window are also ignored.
-        token_mat = [np.isin(self.vocab, batch, assume_unique=True).astype(
-            'float') for batch in tokens.T]
-        token_mat = np.concatenate(token_mat, axis=1)
-        return token_mat  # dims: [vocab.size, batch_size]
+        More efficient for the case that there is only a single word per OHE.
+        E.g. for target word encoding, or context in the case of S-gram.
 
-    def encode_idx(self, tokens: npt.NDArray[str]):
-        """From text tokens to index numbers.
+        For multiword per OHE, possible duplicate words in OHE necessitate other
+        OHE method.
 
-        Input dims: [Context length - 1, Batch]
+        Input dims: [1, Batch]
         """
+        assert tokens.shape[0] == 1, ('Method only valid on single word OHE.'
+                                      ' Multiword OHE method required')
         # If a word is not in the vocab, it gets ignored.
-        # Need to iterate through tokens to handle repeated words within
-        # a batch.
-        index_mat = np.zeros(tokens.shape, dtype=self._index.dtype)
-        for i, batch in enumerate(tokens.T):
-            index_mat[:, i] = np.concatenate([self._index[self.vocab == word] for word in batch])
-        return index_mat  # dims -> [window-1, batch_size]
+        idx = self.encode_idx_fast(tokens)
+        ohe_mat = np.zeros((self.size, tokens.shape[1]))  # [V, B]
+        ohe_mat[idx.squeeze(), range(tokens.shape[1])] = 1
+        return ohe_mat  # dims: [V, B]
 
     def encode_idx_fast(self, tokens: npt.NDArray[str]):
         """From text tokens to index numbers.
@@ -261,7 +270,7 @@ class Cbow:
         self.vocab = vocab
         # State variables, used in backprop.
         self.state = {
-            'context': np.zeros((window-1, batch_size)),
+            'context': np.empty((window-1, batch_size), dtype=np.dtype('<U20')),
             'context_ohe': np.zeros((vocab.size, batch_size)),
             'projection': np.zeros((embed_dim, batch_size)),
             'logits': np.zeros((vocab.size, batch_size)),
@@ -272,7 +281,7 @@ class Cbow:
             'w2': np.zeros_like(self.params['w2'])
         }
 
-    def forward(self, context: npt.NDArray) -> npt.NDArray:
+    def forward(self, context: npt.NDArray[str]) -> npt.NDArray:
         """Input dim: [N-1, B]."""
         context_ohe = self.vocab.encode_ohe_fast(context) / (self.window-1)  # [V, B]
         projection = self.params['w1'] @ context_ohe  # [D,V] @ [V,1] = [D,B]
@@ -285,11 +294,6 @@ class Cbow:
         self.state['probs'] = probs
         return probs  # [V, B]
 
-    def _calc_dlogits(self):
-        """dlogits calculation differs for S-gram and Cbow."""
-        # CBOW implementation of dlogits.
-        return self.state['probs'] - self.state['target_ohe']  # [V,B] - [V,B] = [V,B]
-
     def backward(self):
         # dlogits calculation is abstracted out as it differs slightly for CBOW
         # and S-gram.
@@ -298,22 +302,27 @@ class Cbow:
         dproj = self.params['w2'].T @ dlogits  # [D,V] @ [V,B] = [D,B]
         self.grads['w1'] = dproj @ self.state['context_ohe'].T  # [D,V] = [D,B] @ [B,V]
 
-    def cross_entropy(self):
-        """Cross entropy loss differs for S-gram and CBOW."""
-        # sum across vocab [V], mean across batch [B],
-        return -(np.log(self.state['probs'] + 1e-9) * self.state['target_ohe']).sum(0).mean()
-
     def loss_fn(self, actual: npt.NDArray):
-        """Loss function differes for CBOW and S-gram"""
+        """Loss function differs for CBOW and S-gram"""
         # Cbow input dims: [1, B]
         self.state['target_str'] = actual
-        self.state['target_ohe'] = self.vocab.encode_ohe_fast(actual)
+        self.state['target_ohe'] = self.vocab.encode_ohe_fast_single_word(actual)
         self.state['loss'] = self.cross_entropy()
         return self.state['loss']
 
     def optim_sgd(self, alpha):
         self.params['w2'] -= alpha * self.grads['w2']
         self.params['w1'] -= alpha * self.grads['w1']
+
+    def _calc_dlogits(self):
+        """dlogits calculation differs for S-gram and Cbow."""
+        # CBOW implementation of dlogits.
+        return self.state['probs'] - self.state['target_ohe']  # [V,B] - [V,B] = [V,B]
+
+    def cross_entropy(self):
+        """Cross entropy loss differs for S-gram and CBOW."""
+        # sum across vocab [V], mean across batch [B],
+        return -(np.log(self.state['probs'] + 1e-9) * self.state['target_ohe']).sum(0).mean()
 
     def forward_quick(self, context: npt.NDArray[str]):
         """Equivalent to `forward`, but supposed to be quicker.
@@ -349,7 +358,7 @@ class Cbow:
 
         # slice out each batch and insert only the changed w1 values.
         context_idx = self.vocab.encode_idx_fast(self.state['context'])  # [N-1, B]
-        # Can save 30 microsecs by subseting on context_ohe within the loop.
+        # Can save 30 microsecs by subsetting on context_ohe within the loop.
         context_reduced = np.take_along_axis(
             self.state['context_ohe'], context_idx, axis=0)  # [N-1, B]
         self.grads['w1'] = np.zeros_like(self.grads['w1'])
@@ -422,23 +431,19 @@ class Sgram(Cbow):
 
     def cross_entropy(self):
         """Cross entropy loss differs for S-gram and CBOW."""
-        # Sgram has an extra dim in the output as each context word in output\
+        # Sgram has an extra dim in the output as each context word in output
         # has its own OHE.
         # dims: probs: [V, B], target_ohe: [V, B, N - 1]
-        loss = []
-        for i in range(self.state['target_ohe'].shape[2]):
-            # sum across vocab, mean across batch, for each output OHE.
-            loss.append(-(np.log(self.state['probs'] + 1e-9) * self.state['target_ohe'][:, :, i]).sum(0).mean())
-        return np.array(loss).mean()
+        # sum across vocab, mean across context words and batch.
+        return -(np.log(self.state['probs'] + 1e-9)[:, :, np.newaxis] *
+                 self.state['target_ohe']).sum(0).mean()
 
     def loss_fn(self, actual: npt.NDArray):
         """Input dim for Sgram: [N-1, B]"""
         self.state['target_str'] = actual
         ohe_target = []
-        # iterate across each context word.
-        for i, c in enumerate(actual):
-            ohe_target.append(self.vocab.encode_ohe_fast(np.expand_dims(c, axis=0)))
+        for i, c in enumerate(actual):  # enumerate across context words (N-1)
+            ohe_target.append(self.vocab.encode_ohe_fast_single_word(np.expand_dims(c, axis=0)))
         self.state['target_ohe'] = np.stack(ohe_target, axis=2)
         self.state['loss'] = self.cross_entropy()
         return self.state['loss']
-
