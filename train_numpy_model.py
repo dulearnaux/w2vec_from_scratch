@@ -65,8 +65,8 @@ parser.add_argument('-a', '--alpha', nargs='?', default=0.05,
 
 args = parser.parse_args()
 
-DATA_FILE = args.base_dir / args.data_file
-MODEL_FILE = args.base_dir / args.model_file
+DATA_FILE = Path(args.base_dir) / Path(args.data_file)
+MODEL_FILE = Path(args.base_dir) / Path(args.model_file)
 
 
 # Wrappers to streamline code in the training loop.
@@ -81,10 +81,12 @@ def train_batch(model: Union[Cbow, Sgram], chunk: Tuple[Tuple[List[str], str]]):
     if type(model) is Cbow:
         model.forward_quick(context)
         model.loss.append(model.loss_fn(target))
+        model.backward_quickest()
     elif type(model) is Sgram:
         model.forward_quick(target)
         model.loss.append(model.loss_fn(context))
     model.backward_quick()
+        model.backward_quickest()
     model.optim_sgd(alpha)
 
 
@@ -131,6 +133,7 @@ def load_model(vocab: Vocab, args: argparse.Namespace, seed: int = None
                 tmp = pickle.load(fp)
             model = tmp['model']
             model._batch_size = args.batch_size
+            print(f'{MODEL_FILE} Successfully loaded')
         except FileNotFoundError:
             print(f'{MODEL_FILE} does not exist. Check file name, '
                   'or use overwrite_model arg to start from scratch')
@@ -155,6 +158,8 @@ if __name__ == '__main__':
     print(f'Model Class: {mdl.__class__}\n')
     start_time = time.time()
     for epoch in range(mdl.epoch, args.epochs):
+    epoch_start = mdl.epoch
+    for epoch in range(epoch_start, args.epochs):
         batch_counter = 0
         data = Dataloader(train_data, mdl.window)
         batched_data = grouper(data, args.batch_size)
@@ -174,6 +179,8 @@ if __name__ == '__main__':
         mdl.epoch += 1
         with open(f'{MODEL_FILE}.{mdl.epoch:04}', 'wb') as fp:
             pickle.dump({'model': mdl}, fp)
+        # Keep only the last 4 checkpoints.
+        Path(f'{MODEL_FILE}.{mdl.epoch - 4:04}').unlink(missing_ok=True)
 
     # realistically, the epoch loop isn't completed. Progress is tracked and
     # the program will get manually terminated long before all epochs are run.
