@@ -44,7 +44,7 @@ parser.add_argument('-o', '--overwrite_model',
                          'passed. Otherwise looks for model_file in base_dir to '
                          'load and resume training for it.')
 parser.add_argument('-t', '--type', nargs='?', type=str,
-                    default='cbow', choices=['cbow', 'sgram'],
+                    default='cbow', choices=['cbow', 'sgram', 'cbow_neg'],
                     help='Type of model to use. CBOW or S-gram. This will only'
                          ' apply if overwrite_model is used.')
 parser.add_argument('-w', '--window', nargs='?', default=7,
@@ -52,6 +52,10 @@ parser.add_argument('-w', '--window', nargs='?', default=7,
                     help='window size for the model. E.g. for window=5, 2 words'
                          ' on the left and 2 words on the right of the target '
                          'word are used as context.')
+parser.add_argument('-k', '--neg_samples', nargs='?', default=5,
+                    type=int,
+                    help='Number of negative samples to use. Only applies if '
+                         'type is in [cbow_neg, sgram_neg]')
 parser.add_argument('-v', '--vector_dim', nargs='?', default=300,
                     type=int,
                     help='number of embedding dimensions to use for the cbow')
@@ -70,7 +74,8 @@ MODEL_FILE = Path(args.base_dir) / Path(args.model_file)
 
 
 # Wrappers to streamline code in the training loop.
-def train_batch(model: Union[Cbow, Sgram], chunk: Tuple[Tuple[List[str], str]]):
+def train_batch(model: Union[Cbow, Sgram, CbowNS], chunk: Tuple[Tuple[List[str], str]],
+                alpha):
     """Wrapper around training steps.
 
     Chunk: batch size tuple of (List(context), target) pairs.
@@ -85,18 +90,32 @@ def train_batch(model: Union[Cbow, Sgram], chunk: Tuple[Tuple[List[str], str]]):
     elif type(model) is Sgram:
         model.forward_quick(target)
         model.loss.append(model.loss_fn(context))
-    model.backward_quick()
         model.backward_quickest()
+    elif type(model) is CbowNS:
+        neg_words = data.neg_samples(context, target)
+        model.forward_neg_quick(target, context, neg_words)
+        model.loss.append(model.loss_fn_neg())
+        model.backward_neg_quick()
+    # elif type(model) is SgramNS:
+    #     neg_words = data.neg_samples(context, target)
+    #     model.forward_neg_quick(target, context, neg_words)
+    #     model.loss.append(model.loss_fn_neg())
+    #     model.backward_neg_quick()
     model.optim_sgd(alpha)
 
-
-def stats_print(model: Union[Cbow, Sgram], data: Dataloader, batch_counter:int,
+def stats_print(model: Union[Cbow, Sgram, CbowNS], data: Dataloader, batch_counter:int,
                 start_time: float, alpha: float):
     """Prints stats to screen and saves them to model obj."""
+    if type(model) in (CbowNS,):
+        # This loss is comparable to Cbow and Sgram
+        loss_normalized = model.loss_normalized()
+    else:
+        loss_normalized = model.loss[-1]
     print(f'epoch: {model.epoch},   '
           f'line_no {data.line_no:05} of {len(data.data)},   '
           f'time: {(time.time() - start_time) / 60:.6}min,   '
           f'loss:{model.loss[-1]:.5}    '
+          f'loss (normalize):{loss_normalized:.5}    '
           )
     # Keep training progress for later analysis of hyperparams.
     model.stats.loc[len(model.stats)] = [
@@ -104,10 +123,12 @@ def stats_print(model: Union[Cbow, Sgram], data: Dataloader, batch_counter:int,
         batch_counter,
         batch_counter * model.batch_size,
         (time.time() - start_time) / 60,
-        model.loss[-1], alpha]
+        model.loss[-1],
+        loss_normalized,
+        alpha]
 
 
-def stats_save(model: Union[Cbow, Sgram], data: Dataloader,
+def stats_save(model: Union[Cbow, Sgram, CbowNS], data: Dataloader,
                args: argparse.Namespace, model_file: str = MODEL_FILE):
     """Saves model and plots to files."""
     model.plot_loss_curve(args.base_dir / f'{args.type}.loss.png')
@@ -117,7 +138,7 @@ def stats_save(model: Union[Cbow, Sgram], data: Dataloader,
 
 
 def load_model(vocab: Vocab, args: argparse.Namespace, seed: int = None
-               ) -> Union[Cbow, Sgram]:
+               ) -> Union[Cbow, Sgram, CbowNS]:
     if args.overwrite_model:
         if args.type.lower() == 'cbow':
             model = Cbow(vocab, args.vector_dim, args.window, args.batch_size,
@@ -125,8 +146,14 @@ def load_model(vocab: Vocab, args: argparse.Namespace, seed: int = None
         elif args.type.lower() == 'sgram':
             model = Sgram(vocab, args.vector_dim, args.window, args.batch_size,
                           seed=seed)
+        elif args.type.lower() == 'cbow_neg':
+            model = CbowNS(vocab, args.vector_dim, args.window, args.batch_size,
+                           seed=seed)
+        elif args.type.lower() == 'sgram_neg':
+            raise NotImplementedError('sgram_neg not implemented yet.')
         else:
-            raise ValueError(f'{args.type=}. Should be in ("cbow", "sgram")')
+            raise ValueError(f'{args.type=}. Should be in '
+                             f'("cbow", "sgram", "cbow_neg", "sgram_neg)')
     else:
         try:
             with open(MODEL_FILE, 'rb') as fp:
@@ -157,21 +184,23 @@ if __name__ == '__main__':
     mdl = load_model(vocab, args, seed=1)
     print(f'Model Class: {mdl.__class__}\n')
     start_time = time.time()
-    for epoch in range(mdl.epoch, args.epochs):
     epoch_start = mdl.epoch
+    # NS is faster, don't want to save as often
+    iteration_adj = (10 if type(mdl) in (CbowNS,) else 1)
     for epoch in range(epoch_start, args.epochs):
         batch_counter = 0
-        data = Dataloader(train_data, mdl.window)
+        # neg samples will be ignored unless data.neg_samples() is directly called.
+        data = Dataloader(train_data, mdl.window, negative_samples=args.neg_samples)
         batched_data = grouper(data, args.batch_size)
 
         for chunk in batched_data:
             alpha = args.alpha if epoch < 70 else 0.0008
-            train_batch(mdl, chunk)
+            train_batch(mdl, chunk, alpha)
             batch_counter += 1
 
-            if batch_counter % 10 == 0:
+            if batch_counter % (10*iteration_adj) == 0:
                 stats_save(mdl, data, args)
-            if batch_counter % 100 == 0 or data.line_no == 1:
+            if batch_counter % (100*iteration_adj) == 0 or data.line_no == 1:
                 stats_print(mdl, data, batch_counter, start_time, alpha)
 
         # Save checkpoint at the end of each epoch. Make sure disk has enough

@@ -1,9 +1,12 @@
 import random
+import math
 from typing import Sequence, Tuple, List
 import numpy.typing as npt
 
 import numpy as np
 import pandas as pd
+from collections import Counter
+from functools import partial
 import matplotlib.pyplot as plt
 
 
@@ -132,9 +135,17 @@ class Dataloader:
     Generates target token and context tokens around the target word. Each
     iteration increments along the training_data to generate a context, target
     pair.
+
+    Attributes:
+        window: full length of context window to use. E.g. if window is 5, we
+            sample 2 words to either side of the target word, such that the
+            total window length is 2+1+2.
+        negative_samples: number of negative samples to return. These will be
+            selected to not intersect with either target or context.
     """
 
-    def __init__(self, data: Sequence[Sequence[str]], window: int):
+    def __init__(self, data: Sequence[Sequence[str]], window: int,
+                 negative_samples=0):
         assert (window - 1) * 0.5 % 1 == 0 and window > 2, f'window must be odd and > 2'
         self.data = data
         self.window = int(window)
@@ -142,6 +153,10 @@ class Dataloader:
         self.win_pad = int((window - 1) / 2)  # padding on either side of target
         self.idx = self.win_pad  #
         self.line = self.data[self.line_no]
+        self.k = negative_samples
+        if negative_samples > 0:
+            # initialize the noise distribution
+            self._init_noise_dist()
 
     def __iter__(self):
         return self
@@ -178,6 +193,64 @@ class Dataloader:
         else:
             raise StopIteration
 
+    def _init_noise_dist(self):
+        """Creates a noise distribution to sample from.
+
+        P ~ U(x)^0.75
+
+        Adopt distribution from Mikolov et al (pf 4).
+        https://arxiv.org/pdf/1310.4546
+        """
+        # Get word frequencies in the data.
+        data_flat = ' '.join([' '.join(line) for line in self.data]).split(' ')
+        frequencies = Counter(data_flat)
+        total = len(data_flat)
+        for k in frequencies.keys():
+            frequencies[k] /= total
+        assert math.isclose(sum([v for v in frequencies.values()]), 1), 'Something is wrong with the noise distribution.'
+
+        for k in frequencies.keys():
+            frequencies[k] **= 0.75
+
+        norm_const = sum([v for v in frequencies.values()])
+        for k in frequencies.keys():
+            frequencies[k] /= norm_const
+        assert math.isclose(sum([v for v in frequencies.values()]), 1), 'Something is wrong with the noise distribution.'
+        self.noise_dist_dict = frequencies
+        self.noise_dist_words = np.array([k for k in frequencies.keys()])
+        self.noise_dist_probs = np.array([v for v in frequencies.values()])
+
+    def neg_samples(self, context, target):
+        assert self.k > 0, 'Attempt to draw negative samples when k <= 0 is invalid.'
+        rng = np.random.default_rng()
+        words_to_exclude = np.concatenate([context, target], axis=0)
+
+        sampler = partial(rng.choice, a=self.noise_dist_words, replace=False, p=self.noise_dist_probs, shuffle=False)
+        neg_samples = sampler(size=(self.k, target.shape[1]))
+        # Duplicate samples are rare, so this remains about 5x faster than
+        # sampling independently for each column to enforce uniqueness.
+        neg_samples = self._remove_dupe_negs(sampler, neg_samples, words_to_exclude)
+        return neg_samples
+
+    def _remove_dupe_negs(self, generator, samples, excludes):
+        """Replaces samples with duplicate words."""
+        # dims samples:[K, B], excludes:[N, B]
+        c = 0
+        for i in range(samples.shape[1]):
+            if len(np.unique(samples[:, i])) != len(samples[:, i]):
+                samples[:, i] = generator(size=samples[:, i].shape)
+            if np.any(np.isin(samples[:, i], excludes[:, i])):
+                samples[:, i] = generator(size=samples[:, i].shape)
+
+        # check all samples are unique. Recurse if not. Because dupes are rare
+        # this is efficient.
+        for i in range(samples.shape[1]):
+            if len(np.unique(samples[:, i])) != len(samples[:, i]):
+                self._remove_dupe_negs(generator, samples, excludes)
+            elif np.any(np.isin(samples[:, i], excludes[:, i])):
+                self._remove_dupe_negs(generator, samples, excludes)
+        return samples
+
     def sample_random(self, seed=None):
         """Returns random target and context words."""
         random.seed(seed)
@@ -205,6 +278,10 @@ class Dataloader:
             return length
 
 
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
+
+
 class Cbow:
     """Continuous Bag of Words model from original word2vec paper.
 
@@ -220,6 +297,13 @@ class Cbow:
 
     Efficient Estimation of Word Representations in Vector Space.
     https://arxiv.org/pdf/1301.3781
+
+    Attributes:
+        window: window size for context. E.g. window=5 means 2 words on either
+            side of teh target word are used, such that there are 5 words in the
+            window including the target word.
+        embed_dim: number of dimension for each word embedding.
+        batch_size: size of the batche in training.
     """
 
     @property
@@ -254,11 +338,13 @@ class Cbow:
         # stats data frame tracks the progress of training.
         self.stats = pd.DataFrame(
             columns=[
-                'epoch', 'batch_iters', 'iters', 'time (min)', 'loss', 'alpha'
+                'epoch', 'batch_iters', 'iters', 'time (min)', 'loss',
+                'loss(norm)', 'alpha'
             ]).astype({
-                'epoch': 'int', 'batch_iters': 'int', 'iters': 'int',
-                'time (min)': 'float64', 'loss': 'float64', 'alpha': 'float32'
-            })
+            'epoch': 'int', 'batch_iters': 'int', 'iters': 'int',
+            'time (min)': 'float64', 'loss': 'float64',
+            'loss(norm)': 'float64', 'alpha': 'float32'
+        })
         self.loss = []  # history of loss
         self.epoch = 0
 
@@ -268,7 +354,7 @@ class Cbow:
         self.vocab = vocab
         # State variables, used in backprop.
         self.state = {
-            'context': np.empty((window-1, batch_size), dtype=np.dtype('<U20')),
+            'context': np.empty((window - 1, batch_size), dtype=np.dtype('<U20')),
             'context_ohe': np.zeros((vocab.size, batch_size)),
             'projection': np.zeros((embed_dim, batch_size)),
             'logits': np.zeros((vocab.size, batch_size)),
@@ -281,9 +367,9 @@ class Cbow:
 
     def forward(self, context: npt.NDArray[str]) -> npt.NDArray:
         """Input dim: [N-1, B]."""
-        context_ohe = self.vocab.encode_ohe_fast(context) / (self.window-1)  # [V, B]
-        projection = self.params['w1'] @ context_ohe  # [D,V] @ [V,1] = [D,B]
-        logits = self.params['w2'] @ projection  # [V, D] x [D, 1] = [V, B]
+        context_ohe = self.vocab.encode_ohe_fast(context) / (context.shape[0])  # [V, B]
+        projection = self.params['w1'] @ context_ohe  # [D,V] @ [V,B] = [D,B]
+        logits = self.params['w2'] @ projection  # [V, D] x [D, B] = [V, B]
         probs = softmax(logits)  # [V, B]
         # Save the forward pass state.
         self.state['context'] = context
@@ -402,7 +488,7 @@ class Cbow:
             'valid')
         ax.plot(np.arange(len(y)), y, 'blue')
         # log(1/V) is the neutral untrained error. When all probabilities are equal.
-        ax.hlines(y=-np.log(1 / self.vocab.size), colors='red', xmin=0, xmax=len(y))
+        # ax.hlines(y=-np.log(1 / self.vocab.size), colors='red', xmin=0, xmax=len(y))
         if filename:
             plt.savefig(filename, bbox_inches='tight')
         else:
@@ -479,12 +565,214 @@ class Sgram(Cbow):
         return -(np.log(self.state['probs'] + 1e-9)[:, :, np.newaxis] *
                  self.state['target_ohe']).sum(0).mean()
 
-    def loss_fn(self, actual: npt.NDArray):
-        """Input dim for Sgram: [N-1, B]"""
-        self.state['target_str'] = actual
-        ohe_target = []
-        for i, c in enumerate(actual):  # enumerate across context words (N-1)
-            ohe_target.append(self.vocab.encode_ohe_fast_single_word(np.expand_dims(c, axis=0)))
-        self.state['target_ohe'] = np.stack(ohe_target, axis=2)
-        self.state['loss'] = self.cross_entropy()
+
+class CbowNS(Cbow):
+    """CBOW with negative sampling."""
+
+    def forward_neg(self, target: npt.NDArray[str], context: npt.NDArray[str], neg_words: npt.NDArray[str]) -> npt.NDArray[float]:
+        """Similar to Cbow.forward, but outputs probs for negative sampling.
+
+        This method is not efficient and doesn't take advantage of the sparseness
+        of negative sampling. It is simpler and used to validate the more
+        efficient methods below.
+
+        Differences from Cbow forward are outlined below:
+            * Identical upto logits.
+            * non-context and non-negative words are zeroed out in logits.
+            * probs uses sigmoid rather than softmax.
+        """
+        context_ohe = self.vocab.encode_ohe_fast(context) / (context.shape[0])  # [V, B]
+        projection = self.params['w1'] @ context_ohe  # [D,V] @ [V,B] = [D,B]
+        logits = self.params['w2'] @ projection  # [V, D] x [D, B] = [V, B]
+
+        # Zero out words that are not in context or negative samples.
+        target_idx = self.vocab.encode_idx_fast(target)  # [1, B]
+        neg_idx = self.vocab.encode_idx_fast(neg_words)  # [K, B]
+        output_idx = np.concatenate([target_idx, neg_idx])  # [K + 1, B]
+        mask = np.zeros_like(logits, dtype=bool)
+        for b in range(self.batch_size):
+            mask[output_idx[:, b], b] = True
+        # sigmoid will make these probs=1, s.t. the loss is log(1) = 0 for these.
+        # added benefit of automatically zeroing out grad dW2, e.g. prob-1 = 0,
+        logits[~mask] = np.Inf
+        # negate the logits for negative words
+        for b in range(self.batch_size):
+            logits[neg_idx[:, b], b] *= -1
+
+        probs = sigmoid(logits)  # [V, B], [K + N -1, B] are non-zero.
+        # Save the forward_neg pass state.
+        self.state['context'] = context
+        self.state['target'] = target
+        self.state['neg_words'] = neg_words
+        self.state['context_ohe'] = context_ohe  # used by self.backward
+        self.state['projection'] = projection  # used by self.backward
+        self.state['probs'] = probs  # used by self.backward & self.loss_fn_neg
+        # self.state['output_idx'] = output_idx
+        return probs  # [V, B],
+
+    def _calc_dlogits(self):
+        """Similar to Cbow dlogits, but generates grads for negative sampling.
+
+        dlogits is the only difference between regular and negative sampling
+        backwards calculations. This enables us to use the inherited
+        Cbow.backwards method, although it would not be optimised to take
+        advantage of negative samplings sparseness
+
+        Differences from Cbow dlogits is outlined below:
+            * dlogits is (p-1) for pos words. (1-p) for neg words.
+                For regular CBOW/Sgram its  dlogits = p - OHE
+            * since logits for non-pos and non-neg words is set to Inf, they
+                automatically reduce to a zero gradient!
+        """
+        # dlogits for non-pos and non-neg words is 0, since they artificially have prob=1.
+        dlogits = (self.state['probs'] - 1)  # [V,B] - [V,B] = [V,B]
+        # negate the negative words, since they should be 1-prob.
+        neg_idx = self.vocab.encode_idx_fast(self.state['neg_words'])  # [K, B]
+        for b in range(self.batch_size):
+            dlogits[neg_idx[:, b], b] *= -1
+        return dlogits
+
+    def loss_fn_neg(self) -> float:
+        """Negative sampling loss function.
+
+        loss = -log(prob_pos) - sum(log(-prob_neg))
+        Since:  sigmoid(x) = 1 - sigmoid(-x)
+        loss = -log(prob_pos) + sum(log(prob_neg)) - 1
+
+        I.e. Want to maximize prob_pos, and minimize prob_neg) to reduce loss.
+        """
+        # sum across pos and neg words, mean across batches.
+        # because we applied -1 to the negative words in the forward_neg pass we
+        # can simply take the log and sum all probs
+        self.state['loss'] = -np.log(self.state['probs']).sum(0).mean()  # [K+1, B] -> scalar
         return self.state['loss']
+
+    def forward_neg_quick(self, target, context, neg_words):
+        """Input dims:
+            target (a.k.a output layer): S-gram[N-1, B], CBOW[1, B]
+            context (a.k.a. input layer): S-gram[1, B], CBOW[N-1, B]
+            neg_words: [K, B]
+        """
+        # Operating under assumption that neg words don't intersect with target
+        # or context words.
+        output = np.vstack([target, neg_words])  # [1+K, B]
+        # neg_indicator applies -1 to neg words on the logit values.
+        neg_mask = np.array([False] * target.shape[0] + [True] * neg_words.shape[0])
+        neg_indicator = np.ones(output.shape[0])  # [1+k]
+        neg_indicator[neg_mask] = -1  # set neg words to -1.
+
+        input_idx = self.vocab.encode_idx_fast(context)  # [N-1, B]
+        output_idx = self.vocab.encode_idx_fast(output)  # [1+K, B]
+
+        projection_sub = self.params['w1'][:, input_idx]  # [D, N-1, B]
+        projection = projection_sub.mean(axis=1, keepdims=True).squeeze(axis=1)  # [D, N-1, B] -> [D, B]
+
+        # logits includes both pos and neg words. Sum over embed dim, so we have
+        # a logit for each word (pos and neg) and each batch.
+        logits = (self.params['w2'][output_idx, :] * projection.T).sum(-1)  # [1+K, B, D] * [D, B].T).sum(-1) = [1+K, B]
+        # Negative words are negated inside the sigmoid in the loss functions.
+        logits *= neg_indicator[:, np.newaxis]
+        probs = sigmoid(logits)  # [1+K, B]
+
+        # Save the forward_neg pass state.
+        self.state['context'] = context
+        self.state['target'] = target
+        self.state['neg_words'] = neg_words
+        self.state['input_idx'] = input_idx  # used in self.backward_neg_quick
+        self.state['output_idx'] = output_idx  # used in self.backward_neg_quick
+        self.state['neg_mask'] = neg_mask
+        self.state['probs'] = probs
+        self.state['projection'] = projection
+        return probs
+
+    def backward_neg(self):
+        # backward method is similar for regular and negative sampling.
+        # The only difference is captured by _calc_dlogits()
+        self.backward()
+
+    def backward_neg_quick(self):
+        """Same as backward_neg, except only operates on pos and neg words."""
+        input_idx = self.state['input_idx']  # [N-1, B]
+        probs_pos = self.state['probs'][~self.state['neg_mask'], :]  # [1, B]
+        probs_neg = self.state['probs'][self.state['neg_mask'], :]  # [K, B]
+        pos_idx = self.state['output_idx'][~self.state['neg_mask']]  # [1, B]
+        neg_idx = self.state['output_idx'][self.state['neg_mask']]  # [K, B]
+
+        # Input Matrix Gradients
+        # TODO a bit of work to enable handling of multiple target words at once
+        #  as would be required by s-gram. Needs new negative words for each
+        #  target word. Need to figure out how this combines with the batch dim.
+        dh_pos = np.zeros((self.embed_dim, self.batch_size))
+        dh_neg = np.zeros((self.embed_dim, self.batch_size))
+        for b in range(self.batch_size):
+            dh_pos[:, b] = (probs_pos - 1)[:, b] * self.params['w2'][pos_idx[:, b], :]  # [1, 1] * [D, 1]  = [1, D]
+            dh_neg[:, b] = ((1 - probs_neg)[:, b, np.newaxis] * self.params['w2'][neg_idx[:, b], :]).sum(0)  # [K, 1] * [K, D]  = [K, D].sum(0) = [1, D]
+        dh = dh_pos + dh_neg  # [D, B]
+        self.grads['w1'][:] = 0
+        # mean acros batches. Distribute gradient across each input words vector.
+        for b in range(self.batch_size):
+            # Need to loop over each context word sing += only does single
+            # operation for duplicate words
+            for i in range(input_idx.shape[0]):
+                self.grads['w1'][:, input_idx[i, b]] += dh[:, b] / input_idx.shape[0]  # [N -1, D] -> [N-1, D]
+
+        # Output Matrix Gradients
+        dw2_pos = np.zeros((self.vocab.size, self.embed_dim))
+        dw2_neg = np.zeros((self.vocab.size, self.embed_dim))
+        for b in range(self.batch_size):
+            dw2_pos[pos_idx[:, b], :] += ((probs_pos[:, b] - 1) *
+                                          self.state['projection'][:, b])  # [1, 1] * [D, 1]  = [D, 1]
+            dw2_neg[neg_idx[:, b], :] += ((1 - probs_neg[:, b, np.newaxis]) *
+                                          self.state['projection'][:, b])  # [K, 1] * [D, 1]  = [D, K]
+        self.grads['w2'] = (dw2_pos + dw2_neg)
+
+    def backward_neg_quickest(self):
+        """Same as backward_neg_quick, except uses optimized np indexing.
+
+        It's not easy to understand the matrix operations in this method, so
+        slower more explicit methods are retained for pedagogical reasons.
+        """
+        input_idx = self.state['input_idx']  # [N-1, B]
+        probs_pos = self.state['probs'][~self.state['neg_mask'], :]  # [1, B]
+        probs_neg = self.state['probs'][self.state['neg_mask'], :]  # [K, B]
+        pos_idx = self.state['output_idx'][~self.state['neg_mask']]  # [1, B]
+        neg_idx = self.state['output_idx'][self.state['neg_mask']]  # [K, B]
+
+        idx = np.vstack([pos_idx, neg_idx])  # [1+K, B]
+        probs = np.vstack([probs_pos - 1, 1 - probs_neg])  # [1+K, B]
+
+        # Input Matrix Gradients
+        self.grads['w1'][:] = 0
+        # TODO a bit of work to enable handling of multiple target words at once
+        #  as would be required by s-gram. Needs new negative words for each
+        #  target word. Need to figure out how this combines with the batch dim.
+        dh = np.einsum('kb,kbd->db', probs, self.params['w2'][idx, :])  # [K+1, B], [K+1, B, D] -> [D, B]
+        dh /= input_idx.shape[0]  # [D, B] Distribute gradient across each input word.
+        # Insert gradient (dh) into relevant words (columns) of d_w1.
+        x = np.arange(self.embed_dim)
+        shp = (input_idx.shape[0], self.embed_dim, self.batch_size)
+        rows = np.broadcast_to(x[:, np.newaxis], shp)
+        cols = np.broadcast_to(input_idx[:, np.newaxis, :], shp)
+        np.add.at(self.grads['w1'], (rows, cols), dh)
+
+        # Output Matrix Gradients
+        self.grads['w2'][:] = 0
+        # einsums below have a more compressed dw2 matrix, that can be inserted
+        # directly into the dw2 matrix using indexing.
+        dw2 = np.einsum('kb,db->kdb', probs, self.state['projection'])  # [K+1, B],[D, B] -> [K+1, D, B]
+        x = np.arange(self.embed_dim)
+        shp = (pos_idx.shape[0] + neg_idx.shape[0], self.embed_dim, self.batch_size)
+        cols = np.broadcast_to(x[:, np.newaxis], shp)
+        rows = np.broadcast_to(idx[:, np.newaxis, :], shp)
+        np.add.at(self.grads['w2'], (rows, cols), dw2)
+
+    def loss_normalized(self):
+        """Calculates the standard loss using non-negative sampling.
+
+        This enables useful comparison with standard Cbow and Sgram loss
+        curves. This is a relatively slow operation, so should not be called
+        frequently.
+        """
+        # invoke the softmax forward method to get comparable loss.
+        probs = self.forward_quick(self.state['context'])
+        return self.loss_fn(self.state['target'])
