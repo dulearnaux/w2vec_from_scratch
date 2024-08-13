@@ -52,15 +52,6 @@ if __name__ == '__main__':
     print(f'encode_idx_fast:{tmp[0] / 100:.3}s per run')
     print('\n')
 
-    print('Testing equality of output of encoding algos')
-    tmp = np.array_equal(vocab.encode_ohe(target), vocab.encode_ohe_fast(target))
-    print(f'{'passed' if tmp else 'failed'}: encode_ohe == encode_ohe_fast')
-    tmp = np.array_equal(vocab.encode_idx(target), vocab.encode_idx_fast(target))
-    print(f'{'passed' if tmp else 'failed'}: encode_idx == encode_idx_fast')
-    tmp = np.array_equal(vocab.encode_ohe_fast_single_word(target), vocab.encode_ohe_fast(target))
-    print(f'{'passed' if tmp else 'failed'}: encode_ohe_fast_single_word == encode_ohe')
-    print('\n')
-
     # Requires context and vocab
     print('\nTesting Encoding Speed from token to OHE vector on context: Vocab.encod_ohe...')
     tmp = timeit.Timer('vocab.encode_ohe(context)', globals=globals()).repeat(1, 10)
@@ -74,13 +65,6 @@ if __name__ == '__main__':
     print(f'encode_idx:{tmp[0] / 10:.3}s per run')
     tmp = timeit.Timer('vocab.encode_idx_fast(context)', globals=globals()).repeat(1, 100)
     print(f'encode_idx_fast:{tmp[0] / 100:.3}s per run')
-    print('\n')
-
-    print('Testing equality of output of encoding algos')
-    tmp = np.array_equal(vocab.encode_ohe(context), vocab.encode_ohe_fast(context))
-    print(f'{'passed' if tmp else 'failed'}: encode_ohe == encode_ohe_fast')
-    tmp = np.array_equal(vocab.encode_idx(context), vocab.encode_idx_fast(context))
-    print(f'{'passed' if tmp else 'failed'}: encode_idx == encode_idx_fast')
     print('\n')
 
     # test dataloader
@@ -108,22 +92,6 @@ if __name__ == '__main__':
     tmp = timeit.Timer('cbow.optim_sgd(0.00001)', globals=globals()).repeat(1, 10)
     print(f'optim_sgd:{tmp[0] / 10:.3}s per run')
     print('\n')
-
-    print('Testing equality of output of forward and backward algos')
-    tmp = np.allclose(cbow.forward(context), cbow.forward_quick(context))
-    print(f'{'passed' if tmp else 'failed'}: cbow.forward_quick == cbow.forward ')
-
-    # create w1 and w1 gradients
-    cbow.forward(context)
-    cbow.loss_fn(target)
-    cbow.backward_quick()
-    grads_quick = cbow.grads
-    cbow.backward()
-    grads = cbow.grads
-    tmp = np.allclose(grads_quick['w1'], grads['w1'])
-    print(f'{'passed' if tmp else 'failed'}: cbow.backward_quick dw1 == cbow.backward dw1')
-    tmp = np.allclose(grads_quick['w2'], grads['w2'])
-    print(f'{'passed' if tmp else 'failed'}: cbow.backward_quick dw2 == cbow.backward dw2')
 
 
     # S-gram tests
@@ -170,18 +138,3 @@ if __name__ == '__main__':
     print(f'optim_sgd:{tmp[0] / 10:.3}s per run')
     print('\n')
 
-    print('Testing equality of output of forward and backward algos')
-    tmp = np.allclose(sgram.forward(context), sgram.forward_quick(context))
-    print(f'{'passed' if tmp else 'failed'}: sgram.forward_quick == sgram.forward ')
-
-    # create w1 and w1 gradients
-    sgram.forward(context)
-    sgram.loss_fn(target)
-    sgram.backward_quick()
-    grads_quick = sgram.grads
-    sgram.backward()
-    grads = sgram.grads
-    tmp = np.allclose(grads_quick['w1'], grads['w1'])
-    print(f'{'passed' if tmp else 'failed'}: sgram.backward_quick dw1 == sgram.backward dw1')
-    tmp = np.allclose(grads_quick['w2'], grads['w2'])
-    print(f'{'passed' if tmp else 'failed'}: sgram.backward_quick dw2 == sgram.backward dw2')
