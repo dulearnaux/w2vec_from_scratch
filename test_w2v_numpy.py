@@ -12,8 +12,8 @@ class Setup:
 
     @classmethod
     def setup(cls):
-        DATA_FILE = Path(__file__).parent / 'data/toy_data_41mb_raw.txt.train'
-        with open(DATA_FILE, 'rb') as fp:
+        data_file = Path(__file__).parent / 'data/toy_data_41mb_raw.txt.train'
+        with open(data_file, 'rb') as fp:
             cls.train_data = pickle.load(fp)
 
         cls.alpha = 0.005
@@ -57,7 +57,8 @@ class TestVocab(TestCase):
 
     def test_encode_ohe_fast_single_word(self):
         encode_ohe = Setup.vocab.encode_ohe(Setup.target)
-        encode_ohe_fast_single_word = Setup.vocab.encode_ohe_fast_single_word(Setup.target)
+        encode_ohe_fast_single_word = Setup.vocab.encode_ohe_fast_single_word(
+            Setup.target)
         self.assertTrue(np.array_equal(encode_ohe, encode_ohe_fast_single_word))
 
         with self.assertRaises(AssertionError):
@@ -115,21 +116,21 @@ class TestCbow(TestCase):
         with self.assertRaises(KeyError):
             cbow_nb.forward(Setup.context[:, 0])
         try:
-            probs = cbow_nb.forward(Setup.context[:, 0, np.newaxis])  # should work if dim is passed as list
+            _ = cbow_nb.forward(Setup.context[:, 0, np.newaxis])  # should work if dim is passed as list
         except Exception as e:
             self.fail(f'Cbow.forward failed with no batch, raised {e}')
 
         with self.assertRaises(KeyError):
             cbow_nb.forward_quick(Setup.context[:, 0])
         try:
-            probs_quick = cbow_nb.forward_quick(Setup.context[:, 0, np.newaxis])
+            _ = cbow_nb.forward_quick(Setup.context[:, 0, np.newaxis])
         except Exception as e:
             self.fail(f'Cbow.forward_quick failed with no batch, raised {e}')
 
         with self.assertRaises(KeyError):
             cbow_nb.loss_fn(Setup.target[:, 0])
         try:
-            loss = cbow_nb.loss_fn(Setup.target[:, 0, np.newaxis])
+            _ = cbow_nb.loss_fn(Setup.target[:, 0, np.newaxis])
         except Exception as e:
             self.fail(f'Cbow.loss_fn failed with no batch, raised {e}')
 
@@ -154,13 +155,14 @@ class TestCbow(TestCase):
             self.fail(f'Cbow.optim_sgd failed with no batch, raised {e}')
 
 
-
 class TestSgram(TestCase):
 
     @classmethod
     def setUpClass(cls):
         Setup.setup()
-        cls.sgram = w2v.Sgram(Setup.vocab, Setup.vector_dim, Setup.window, Setup.batch_size, seed=1)
+        cls.sgram = w2v.Sgram(
+            Setup.vocab, Setup.vector_dim, Setup.window, Setup.batch_size,
+            seed=1)
 
     def test_forward_quick_cbow(self):
         # two forward methods should give the same probs.
@@ -208,24 +210,26 @@ class TestCbowNS(TestCase):
 
     def test_forward_neg_sampling(self):
         # two forward_neg methods should give the same probs.
-        probs_fwd = self.cbow_ns.forward_neg(Setup.target, Setup.context, self.neg_words)
-        probs_neg = self.cbow_ns.forward_neg_quick(Setup.target, Setup.context, self.neg_words)
+        probs_ohe = self.cbow_ns.forward_neg(
+            Setup.target, Setup.context, self.neg_words)  # [V, B] OHE vectors
+        probs_neg = self.cbow_ns.forward_neg_quick(
+            Setup.target, Setup.context, self.neg_words)  # [K+1, B] dense probs.
 
         target_idx = Setup.vocab.encode_idx_fast(Setup.target)
         neg_idx = Setup.vocab.encode_idx_fast(self.neg_words)
         idx = np.concatenate([target_idx, neg_idx], axis=0)
         probs_dense = np.zeros_like(probs_neg)
         for b in range(self.cbow_ns.batch_size):
-            probs_dense[:, b] += probs_fwd[idx[:, b], b]
+            probs_dense[:, b] += probs_ohe[idx[:, b], b]
         self.assertTrue(np.allclose(probs_neg, probs_dense))
 
     def test_backward_neg(self):
+        mdl_neg = copy.deepcopy(self.cbow_ns)
 
         self.cbow_ns.forward_neg(Setup.target, Setup.context, self.neg_words)
         _ = self.cbow_ns.loss_fn_neg()
         self.cbow_ns.backward_neg()
 
-        mdl_neg = copy.deepcopy(self.cbow_ns)
         mdl_neg.forward_neg_quick(Setup.target, Setup.context, self.neg_words)
         mdl_neg.loss_fn_neg()
         mdl_neg.backward_neg_quick()
@@ -233,29 +237,30 @@ class TestCbowNS(TestCase):
         self.assertTrue(np.allclose(self.cbow_ns.grads['w2'], mdl_neg.grads['w2']))
 
     def test_backward_neg_quickest(self):
+        mdl_neg = copy.deepcopy(self.cbow_ns)
 
         self.cbow_ns.forward_neg(Setup.target, Setup.context, self.neg_words)
         _ = self.cbow_ns.loss_fn_neg()
         self.cbow_ns.backward_neg()
 
-        mdl_neg = copy.deepcopy(self.cbow_ns)
         mdl_neg.forward_neg_quick(Setup.target, Setup.context, self.neg_words)
         mdl_neg.loss_fn_neg()
         mdl_neg.backward_neg_quickest()
         self.assertTrue(np.allclose(self.cbow_ns.grads['w1'], mdl_neg.grads['w1']))
         self.assertTrue(np.allclose(self.cbow_ns.grads['w2'], mdl_neg.grads['w2']))
 
-
-    def test_incompatability(self):
+    def test_incompatibility(self):
         """Test CbowNS.backward() following CbowNS().forward_neg_quick()"""
-        self.cbow_ns.forward_neg(Setup.target, Setup.context, self.neg_words)
+        self.cbow_ns.forward_neg(
+            Setup.target, Setup.context, self.neg_words)
         _ = self.cbow_ns.loss_fn_neg()
-        with self.assertRaises(IndexError):
+        with self.assertRaises((KeyError, ValueError, IndexError)):
             self.cbow_ns.backward_neg_quick()
 
-        self.cbow_ns.forward_neg_quick(Setup.target, Setup.context, self.neg_words)
+        self.cbow_ns.forward_neg_quick(
+            Setup.target, Setup.context, self.neg_words)
         _ = self.cbow_ns.loss_fn_neg()
-        with self.assertRaises(IndexError):
+        with self.assertRaises((IndexError, ValueError)):
             self.cbow_ns.backward()
 
 

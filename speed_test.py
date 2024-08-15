@@ -72,6 +72,9 @@ if __name__ == '__main__':
     test_data = w2v_numpy.grouper(w2v_numpy.Dataloader(train_data, cbow.window), batch)
     tmp = timeit.Timer('next(test_data)', globals=globals()).repeat(1, 1000)
     print(f'Dataloader iteration:{tmp[0] / 1000:.3}s per iter')
+    test_data = w2v_numpy.Dataloader(train_data, cbow.window, negative_samples=5)
+    tmp = timeit.Timer('test_data.neg_samples(target, context)', globals=globals()).repeat(1, 100)
+    print(f'neg_samples iteration:{tmp[0] / 100:.3}s per iter')
 
     # CBOW tests
     # test CBOW forward speed. Requires context.
@@ -92,7 +95,6 @@ if __name__ == '__main__':
     tmp = timeit.Timer('cbow.optim_sgd(0.00001)', globals=globals()).repeat(1, 10)
     print(f'optim_sgd:{tmp[0] / 10:.3}s per run')
     print('\n')
-
 
     # S-gram tests
     # tests S-gram forward speed. Requires context.
@@ -127,13 +129,11 @@ if __name__ == '__main__':
     print(f'backward:{tmp[0] / 10:.3}s per run')
     tmp = timeit.Timer('cbow_ns.forward_neg_quick(target, context, neg_words)', globals=globals()).repeat(1, 10)
     print(f'forward_neg_quick:{tmp[0] / 10:.3}s per run')
-    tmp = timeit.Timer('cbow_ns.loss_fn_neg()', globals=globals()).repeat(1, 10)
+    cbow_ns.loss_fn_neg()
     tmp = timeit.Timer('cbow_ns.backward_neg_quick()', globals=globals()).repeat(1, 10)
     print(f'backward_neg_quick:{tmp[0] / 10:.3}s per run')
-
-    tmp = timeit.Timer('cbow_ns.loss_fn_neg()', globals=globals()).repeat(1, 10)
-    tmp = timeit.Timer('cbow_ns.backward_neg_quick_test()', globals=globals()).repeat(1, 10)
-    print(f'backward_neg_quick_test:{tmp[0] / 10:.3}s per run')
+    tmp = timeit.Timer('cbow_ns.backward_neg_quickest()', globals=globals()).repeat(1, 10)
+    print(f'backward_neg_quickest:{tmp[0] / 10:.3}s per run')
     tmp = timeit.Timer('cbow_ns.optim_sgd(0.00001)', globals=globals()).repeat(1, 10)
     print(f'optim_sgd:{tmp[0] / 10:.3}s per run')
     print('\n')
