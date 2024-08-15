@@ -219,7 +219,6 @@ class TestCbowNS(TestCase):
     @classmethod
     def setUpClass(cls):
         Setup.setup()
-
         k = 3
         cls.cbow_ns = w2v.CbowNS(Setup.vocab, Setup.vector_dim, Setup.window, Setup.batch_size, seed=1)
         cls.data = w2v.Dataloader(Setup.train_data, cls.cbow_ns.window, negative_samples=k)
@@ -291,3 +290,112 @@ class TestCbowNS(TestCase):
             self.cbow_ns.backward()
 
 
+class TestSgramNS(TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        Setup.setup()
+        k = 3
+        cls.sgram_ns = w2v.SgramNS(
+            Setup.vocab, Setup.vector_dim, Setup.window, Setup.batch_size,
+            seed=1)
+        cls.data = w2v.Dataloader(
+            Setup.train_data,
+            cls.sgram_ns.window,
+            negative_samples=k*(cls.sgram_ns.window-1))
+        # switch context and target for s-gram in negative sampling. We sample k
+        # negative words for each context word. The N-1 context words and
+        # k*(N-1) negative words combine into a single sample.
+        # S.T. Loss = sum over all k*(N-1) negative and (N-1) positive words.
+        cls.neg_words = cls.data.neg_samples(Setup.target, Setup.context, seed=1)
+
+    def test_sgram_ns_flow(self):
+        try:
+            _ = self.sgram_ns.forward_neg(Setup.target, Setup.context, self.neg_words)
+            _ = self.sgram_ns.loss_fn_neg()
+            self.sgram_ns.backward_neg()
+            self.sgram_ns.optim_sgd(Setup.alpha)
+        except Exception:
+            self.fail(f'S-gram NEG failed training workflow test.')
+
+        try:
+            _ = self.sgram_ns.forward_neg_quick(Setup.target, Setup.context, self.neg_words)
+            _ = self.sgram_ns.loss_fn_neg()
+            self.sgram_ns.backward_neg_quick()
+            self.sgram_ns.optim_sgd(Setup.alpha)
+        except Exception:
+            self.fail(f'S-gram NEG quick failed training workflow test.')
+
+        try:
+            _ = self.sgram_ns.forward_neg_quick(Setup.target, Setup.context, self.neg_words)
+            _ = self.sgram_ns.loss_fn_neg()
+            self.sgram_ns.backward_neg_quickest()
+            self.sgram_ns.optim_sgd(Setup.alpha)
+        except Exception:
+            self.fail(f'S-gram NEG quickest failed training workflow test.')
+
+        _ = self.sgram_ns.forward_neg(Setup.target, Setup.context, self.neg_words)
+        _ = self.sgram_ns.loss_fn_neg()
+        with self.assertRaises(IndexError):
+            self.sgram_ns.backward_neg_quick()
+
+        with self.assertRaises(IndexError):
+            self.sgram_ns.backward_neg_quickest()
+
+        _ = self.sgram_ns.forward_neg_quick(Setup.target, Setup.context, self.neg_words)
+        _ = self.sgram_ns.loss_fn_neg()
+        with self.assertRaises(ValueError):
+            self.sgram_ns.backward_neg()
+
+    def test_forward_neg(self):
+        # two forward_neg methods should give the same probs.
+        probs_neg_ohe = self.sgram_ns.forward_neg(
+            Setup.target, Setup.context, self.neg_words)  # [V, B] OHE vectors
+        probs_neg_quick = self.sgram_ns.forward_neg_quick(
+            Setup.target, Setup.context, self.neg_words)  # [K+1, B] dense probs.
+
+        output_idx = Setup.vocab.encode_idx_fast(Setup.context)
+        neg_idx = Setup.vocab.encode_idx_fast(self.neg_words)
+        idx = np.concatenate([output_idx, neg_idx], axis=0)
+        probs_neg_dense = np.zeros_like(probs_neg_quick)
+        for b in range(self.sgram_ns.batch_size):
+            probs_neg_dense[:, b] += probs_neg_ohe[idx[:, b], b]
+        self.assertTrue(np.allclose(probs_neg_quick, probs_neg_dense))
+
+    def test_loss_fn_neg(self):
+        _ = self.sgram_ns.forward_neg(
+            Setup.target, Setup.context, self.neg_words)  # [V, B] OHE vectors
+        loss_neg = self.sgram_ns.loss_fn_neg()
+
+        _ = self.sgram_ns.forward_neg_quick(
+            Setup.target, Setup.context, self.neg_words)  # [K+1, B] dense probs.
+        loss_neg_quick = self.sgram_ns.loss_fn_neg()
+
+        self.assertTrue(np.allclose(loss_neg, loss_neg_quick))
+
+    def test_backward_neg(self):
+        mdl_neg = copy.deepcopy(self.sgram_ns)
+
+        _ = self.sgram_ns.forward_neg(Setup.target, Setup.context, self.neg_words)
+        _ = self.sgram_ns.loss_fn_neg()
+        self.sgram_ns.backward_neg()
+
+        _ = mdl_neg.forward_neg_quick(Setup.target, Setup.context, self.neg_words)
+        _ = mdl_neg.loss_fn_neg()
+        mdl_neg.backward_neg_quick()
+        self.assertTrue(np.allclose(self.sgram_ns.grads['w1'], mdl_neg.grads['w1']))
+        self.assertTrue(np.allclose(self.sgram_ns.grads['w2'], mdl_neg.grads['w2']))
+
+    def test_backward_neg_quick(self):
+        mdl_neg = copy.deepcopy(self.sgram_ns)
+
+        _ = self.sgram_ns.forward_neg_quick(Setup.target, Setup.context, self.neg_words)
+        _ = self.sgram_ns.loss_fn_neg()
+        self.sgram_ns.backward_neg_quick()
+
+        _ = mdl_neg.forward_neg_quick(Setup.target, Setup.context, self.neg_words)
+        _ = mdl_neg.loss_fn_neg()
+        mdl_neg.backward_neg_quickest()
+
+        self.assertTrue(np.allclose(self.sgram_ns.grads['w1'], mdl_neg.grads['w1']))
+        self.assertTrue(np.allclose(self.sgram_ns.grads['w2'], mdl_neg.grads['w2']))

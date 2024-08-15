@@ -44,7 +44,7 @@ parser.add_argument('-o', '--overwrite_model',
                          'passed. Otherwise looks for model_file in base_dir to '
                          'load and resume training for it.')
 parser.add_argument('-t', '--type', nargs='?', type=str,
-                    default='cbow', choices=['cbow', 'sgram', 'cbow_neg'],
+                    default='cbow', choices=['cbow', 'sgram', 'cbow_neg', 'sgram_neg'],
                     help='Type of model to use. CBOW or S-gram. This will only'
                          ' apply if overwrite_model is used.')
 parser.add_argument('-w', '--window', nargs='?', default=7,
@@ -74,8 +74,8 @@ MODEL_FILE = Path(args.base_dir) / Path(args.model_file)
 
 
 # Wrappers to streamline code in the training loop.
-def train_batch(model: Union[Cbow, Sgram, CbowNS], chunk: Tuple[Tuple[List[str], str]],
-                alpha):
+def train_batch(model: Union[Cbow, Sgram, CbowNS, SgramNS],
+                chunk: Tuple[Tuple[List[str], str]], alpha: float):
     """Wrapper around training steps.
 
     Chunk: batch size tuple of (List(context), target) pairs.
@@ -96,17 +96,17 @@ def train_batch(model: Union[Cbow, Sgram, CbowNS], chunk: Tuple[Tuple[List[str],
         model.forward_neg_quick(target, context, neg_words)
         model.loss.append(model.loss_fn_neg())
         model.backward_neg_quick()
-    # elif type(model) is SgramNS:
-    #     neg_words = data.neg_samples(context, target)
-    #     model.forward_neg_quick(target, context, neg_words)
-    #     model.loss.append(model.loss_fn_neg())
-    #     model.backward_neg_quick()
+    elif type(model) is SgramNS:
+        neg_words = data.neg_samples(context, target)
+        model.forward_neg_quick(target, context, neg_words)
+        model.loss.append(model.loss_fn_neg())
+        model.backward_neg_quickest()
     model.optim_sgd(alpha)
 
 def stats_print(model: Union[Cbow, Sgram, CbowNS], data: Dataloader, batch_counter:int,
                 start_time: float, alpha: float):
     """Prints stats to screen and saves them to model obj."""
-    if type(model) in (CbowNS,):
+    if type(model) in (CbowNS, SgramNS):
         # This loss is comparable to Cbow and Sgram
         loss_normalized = model.loss_normalized()
     else:
@@ -128,7 +128,7 @@ def stats_print(model: Union[Cbow, Sgram, CbowNS], data: Dataloader, batch_count
         alpha]
 
 
-def stats_save(model: Union[Cbow, Sgram, CbowNS], data: Dataloader,
+def stats_save(model: Union[Cbow, Sgram, CbowNS, SgramNS], data: Dataloader,
                args: argparse.Namespace, model_file: str = MODEL_FILE):
     """Saves model and plots to files."""
     model.plot_loss_curve(args.base_dir / f'{args.type}.loss.png')
@@ -138,7 +138,7 @@ def stats_save(model: Union[Cbow, Sgram, CbowNS], data: Dataloader,
 
 
 def load_model(vocab: Vocab, args: argparse.Namespace, seed: int = None
-               ) -> Union[Cbow, Sgram, CbowNS]:
+               ) -> Union[Cbow, Sgram, CbowNS, SgramNS]:
     if args.overwrite_model:
         if args.type.lower() == 'cbow':
             model = Cbow(vocab, args.vector_dim, args.window, args.batch_size,
@@ -150,7 +150,8 @@ def load_model(vocab: Vocab, args: argparse.Namespace, seed: int = None
             model = CbowNS(vocab, args.vector_dim, args.window, args.batch_size,
                            seed=seed)
         elif args.type.lower() == 'sgram_neg':
-            raise NotImplementedError('sgram_neg not implemented yet.')
+            model = SgramNS(vocab, args.vector_dim, args.window, args.batch_size,
+                           seed=seed)
         else:
             raise ValueError(f'{args.type=}. Should be in '
                              f'("cbow", "sgram", "cbow_neg", "sgram_neg)')
@@ -186,11 +187,14 @@ if __name__ == '__main__':
     start_time = time.time()
     epoch_start = mdl.epoch
     # NS is faster, don't want to save as often
-    iteration_adj = (10 if type(mdl) in (CbowNS,) else 1)
+    iteration_adj = (10 if type(mdl) in (CbowNS, SgramNS) else 1)
+    neg_sample_adj = ((mdl.window - 1) if type(mdl) is SgramNS else 1)
     for epoch in range(epoch_start, args.epochs):
         batch_counter = 0
         # neg samples will be ignored unless data.neg_samples() is directly called.
-        data = Dataloader(train_data, mdl.window, negative_samples=args.neg_samples)
+        data = Dataloader(
+            train_data, mdl.window,
+            negative_samples=args.neg_samples * neg_sample_adj)
         batched_data = grouper(data, args.batch_size)
 
         for chunk in batched_data:

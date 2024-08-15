@@ -736,9 +736,6 @@ class CbowNS(Cbow):
         neg_idx = self.state['output_idx'][self.state['neg_mask']]  # [K, B]
 
         # Input Matrix Gradients
-        # TODO a bit of work to enable handling of multiple target words at once
-        #  as would be required by s-gram. Needs new negative words for each
-        #  target word. Need to figure out how this combines with the batch dim.
         dh_pos = np.zeros((self.embed_dim, self.batch_size))
         dh_neg = np.zeros((self.embed_dim, self.batch_size))
         for b in range(self.batch_size):
@@ -783,9 +780,6 @@ class CbowNS(Cbow):
 
         # Input Matrix Gradients
         self.grads['w1'][:] = 0
-        # TODO a bit of work to enable handling of multiple target words at once
-        #  as would be required by s-gram. Needs new negative words for each
-        #  target word. Need to figure out how this combines with the batch dim.
         dh = np.einsum('kb,kbd->db', probs, self.params['w2'][idx, :])  # [K+1, B], [K+1, B, D] -> [D, B]
         dh /= input_idx.shape[0]  # [D, B] Distribute gradient across each input word.
         # Insert gradient (dh) into relevant words (columns) of d_w1.
@@ -816,3 +810,32 @@ class CbowNS(Cbow):
         # invoke the softmax forward method to get comparable loss.
         _ = self.forward_quick(self.state['context'])
         return self.loss_fn(self.state['target'])
+
+
+class SgramNS(CbowNS, Sgram):
+    def forward_neg(self,
+                    target: npt.NDArray[str],
+                    context: npt.NDArray[str],
+                    neg_words: npt.NDArray[str]) -> npt.NDArray[float]:
+        # For s-gram, we use Cbow forward method, but witch target and context.
+        return super().forward_neg(
+            target=context, context=target, neg_words=neg_words)
+
+    def forward_neg_quick(self,
+                          target: npt.NDArray[str],
+                          context: npt.NDArray[str],
+                          neg_words: npt.NDArray[str]) -> npt.NDArray[float]:
+        # For s-gram, we use Cbow forward method, but witch target and context.
+        return super().forward_neg_quick(
+            target=context, context=target, neg_words=neg_words)
+
+    def loss_normalized(self):
+        """Calculates the standard loss using non-negative sampling.
+
+        This enables useful comparison with standard Cbow and Sgram loss
+        curves. This is a relatively slow operation, so should not be called
+        frequently.
+        """
+        # invoke the softmax forward method to get comparable loss.
+        _ = self.forward_quick(self.state['context'])
+        return Sgram.loss_fn(self, self.state['target'])
