@@ -74,19 +74,14 @@ class TestCbow(TestCase):
             Setup.vocab, Setup.vector_dim, Setup.window, Setup.batch_size,
             seed=1)
 
-    def test_backward_quickest(self):
-        cbow_test = copy.deepcopy(self.cbow)
-
-        self.cbow.forward(Setup.context)
-        _ = self.cbow.loss_fn(Setup.target)
-        self.cbow.backward()
-
-        cbow_test.forward_quick(Setup.context)
-        cbow_test.loss_fn(Setup.target)
-        cbow_test.backward_quickest()
-        self.assertTrue(np.allclose(self.cbow.grads['w1'], cbow_test.grads['w1']))
-        self.assertTrue(np.allclose(self.cbow.grads['w2'], cbow_test.grads['w2']))
-
+    def test_cbow_flow(self):
+        try:
+            _ = self.cbow.forward_quick(Setup.context)
+            _ = self.cbow.loss_fn(Setup.target)
+            self.cbow.backward()
+            self.cbow.optim_sgd(Setup.alpha)
+        except Exception:
+            self.fail(f'Cbow failed training workflow test.')
 
     def test_forward_quick_cbow(self):
         # two forward methods should give the same probs.
@@ -106,6 +101,19 @@ class TestCbow(TestCase):
         cbow_quick.backward_quick()
         self.assertTrue(np.allclose(self.cbow.grads['w1'], cbow_quick.grads['w1']))
         self.assertTrue(np.allclose(self.cbow.grads['w2'], cbow_quick.grads['w2']))
+
+    def test_backward_quickest(self):
+        cbow_test = copy.deepcopy(self.cbow)
+
+        self.cbow.forward(Setup.context)
+        _ = self.cbow.loss_fn(Setup.target)
+        self.cbow.backward()
+
+        cbow_test.forward_quick(Setup.context)
+        cbow_test.loss_fn(Setup.target)
+        cbow_test.backward_quickest()
+        self.assertTrue(np.allclose(self.cbow.grads['w1'], cbow_test.grads['w1']))
+        self.assertTrue(np.allclose(self.cbow.grads['w2'], cbow_test.grads['w2']))
 
     def test_no_batch(self):
         """Should pass id batch dim is preserved but len=1. Fails if batch dim
@@ -164,7 +172,16 @@ class TestSgram(TestCase):
             Setup.vocab, Setup.vector_dim, Setup.window, Setup.batch_size,
             seed=1)
 
-    def test_forward_quick_cbow(self):
+    def test_sgram_flow(self):
+        try:
+            _ = self.sgram.forward_quick(Setup.target)
+            _ = self.sgram.loss_fn(Setup.context)
+            self.sgram.backward()
+            self.sgram.optim_sgd(Setup.alpha)
+        except Exception:
+            self.fail(f'Sgram failed training workflow test.')
+
+    def test_forward_quick(self):
         # two forward methods should give the same probs.
         probs_fwd = self.sgram.forward(Setup.target)
         probs_quick = self.sgram.forward_quick(Setup.target)
@@ -208,7 +225,17 @@ class TestCbowNS(TestCase):
         cls.data = w2v.Dataloader(Setup.train_data, cls.cbow_ns.window, negative_samples=k)
         cls.neg_words = cls.data.neg_samples(Setup.context, Setup.target)
 
-    def test_forward_neg_sampling(self):
+    def test_cbow_ns_flow(self):
+        try:
+            _ = self.cbow_ns.forward_neg_quick(
+                Setup.target, Setup.context, self.neg_words)
+            _ = self.cbow_ns.loss_fn_neg()
+            self.cbow_ns.backward_neg_quickest()
+            self.cbow_ns.optim_sgd(Setup.alpha)
+        except Exception:
+            self.fail(f'CBOW NEG failed training workflow test.')
+
+    def test_forward_neg(self):
         # two forward_neg methods should give the same probs.
         probs_ohe = self.cbow_ns.forward_neg(
             Setup.target, Setup.context, self.neg_words)  # [V, B] OHE vectors

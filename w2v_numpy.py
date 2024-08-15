@@ -641,6 +641,11 @@ class CbowNS(Cbow):
         output_ohe = self.vocab.encode_ohe_fast(np.concatenate(
             [self.state['target'], self.state['neg_words']], axis=0))
         dlogits = (self.state['probs'] - 1)  # [V,B] - [V,B] = [V,B]
+
+        # for dupe words we had Loss=prob**output_ohe. So differentiate by
+        # multiplying by output_ohe
+        dlogits *= output_ohe
+
         # negate the negative words, since they should be 1-prob.
         neg_idx = self.vocab.encode_idx_fast(self.state['neg_words'])  # [K, B]
         for b in range(self.batch_size):
@@ -659,7 +664,17 @@ class CbowNS(Cbow):
         # sum across pos and neg words, mean across batches.
         # because we applied -1 to the negative words in the forward_neg pass we
         # can simply take the log and sum all probs
-        self.state['loss'] = -np.log(self.state['probs']).sum(0).mean()  # [K+1, B] -> scalar
+
+        # For duplicate words (in the output layer), we need to apply p**counts.
+        # This is the same as repeating the log(p) term in the loss function for
+        # each occurrence of the word.
+        if self.state['probs'].shape == (self.vocab.size, self.batch_size):
+            output_ohe = self.vocab.encode_ohe_fast(np.concatenate(
+                [self.state['target'], self.state['neg_words']], axis=0))
+            probs = self.state['probs'] ** output_ohe
+        else:
+            probs = self.state['probs']
+        self.state['loss'] = -np.log(probs).sum(0).mean()  # [K+1, B] -> scalar
         return self.state['loss']
 
     def forward_neg_quick(self, target, context, neg_words):
@@ -744,10 +759,11 @@ class CbowNS(Cbow):
         dw2_pos = np.zeros((self.vocab.size, self.embed_dim))
         dw2_neg = np.zeros((self.vocab.size, self.embed_dim))
         for b in range(self.batch_size):
-            dw2_pos[pos_idx[:, b], :] += ((probs_pos[:, b] - 1) *
-                                          self.state['projection'][:, b])  # [1, 1] * [D, 1]  = [D, 1]
             dw2_neg[neg_idx[:, b], :] += ((1 - probs_neg[:, b, np.newaxis]) *
                                           self.state['projection'][:, b])  # [K, 1] * [D, 1]  = [D, K]
+            for i in range(pos_idx.shape[0]):  # pos words can be duplicated. So need add each one in a loop.
+                dw2_pos[pos_idx[i, b], :] += ((probs_pos[i, b, np.newaxis] - 1) *
+                                              self.state['projection'][:, b])  # [1, 1] * [D, 1]  = [D, 1]
         self.grads['w2'] = (dw2_pos + dw2_neg)
 
     def backward_neg_quickest(self):
