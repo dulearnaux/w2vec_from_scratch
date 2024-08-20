@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from collections import Counter
 from functools import partial
+from itertools import batched
 import matplotlib.pyplot as plt
 
 
@@ -49,7 +50,11 @@ class Vocab:
         return self._token2index
 
     def __init__(self, data: Sequence[Sequence[str]]):
-        vocab = set(' '.join([' '.join(line) for line in data]).split(' '))
+
+        # Go through data in chunks to balance speed and memory use.
+        vocab = set()
+        for chunk in batched(data, 100_000):  # 100k batches limits memory.
+            vocab = vocab.union(set(' '.join([' '.join(line) for line in chunk]).split(' ')))
 
         self._vocab = np.expand_dims(np.array(list(vocab)), 1)  # dims: [V, 1]
         self._vocab.sort()
@@ -400,7 +405,7 @@ class Cbow:
         dproj = self.params['w2'].T @ dlogits  # [D,V] @ [V,B] = [D,B]
         self.grads['w1'] = dproj @ self.state['context_ohe'].T  # [D,V] = [D,B] @ [B,V]
 
-    def loss_fn(self, actual: npt.NDArray['str']):
+    def loss_fn(self, actual: npt.NDArray['str']) -> float:
         """Loss function differs for CBOW and S-gram
 
         Cbow loss is based on the single central target word.
