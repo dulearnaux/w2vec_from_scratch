@@ -22,12 +22,11 @@ from pathlib import Path
 import pickle
 import os
 
-LOAD_CLEAN = True  # if true, will load saved clean data and not process new.
+LOAD_CLEAN = False  # if true, will load saved clean data and not process new.
 LOAD_TRAIN = False  # if true, will load saved training data and not process new.
 BASE_DIR = Path(__file__).parent
-DATA_FILE = BASE_DIR / 'data/toy_data_41mb_raw.txt'
-LOW_FREQ_THRESHOLD = 10  # minimum frequency threshold for words to include in vocab
-STEM_WORDS = True # To use only word stems set to True
+LOW_FREQ_THRESHOLD = 1000  # minimum frequency threshold for words to include in vocab
+STEM_WORDS = True  # To use only word stems set to True
 
 
 
@@ -118,11 +117,11 @@ if __name__ == '__main__':
 
 
     data = []
-    # load data, about 4Gb
+    # load data, about 4Gb, can do it in-memory
     for file in data_files:
         print(f'cleaning {file}')
-        with open(DATA_FILE, 'rt') as file:
-            text = file.read()
+        with open(file, 'rt') as fl:
+            text = fl.read()
         lines = text.split('\n')
         # Convert to lines of tokens
         clean_lines = [clean_line(line) for line in lines]
@@ -138,11 +137,13 @@ if __name__ == '__main__':
         freqs = Counter(sentences.split(' '))
         vocab_raw += freqs
 
-    vocab = Counter({k: c for k, c in vocab_raw.items() if c >= LOW_FREQ_THRESHOLD*100})
+    vocab = Counter({k: c for k, c in vocab_raw.items() if c >= LOW_FREQ_THRESHOLD})
 
     total = sum(vocab.values())
     print(f'Corpus length = {total:,} word instances')
     print(f'Vocab length = {len(vocab):,} words')
+    # Corpus length = 295,895,420 word instances
+    # Vocab length = 15,358 words
     vocab_probs = {k: v / total for k, v in vocab.items()}
 
     # create discard probabilities according to Mikolov et. al. Section 2.3
@@ -161,6 +162,8 @@ if __name__ == '__main__':
 
     print(f'pre_corpus length is {pre_corpus:,} words')
     print(f'post_corpus length is {post_corpus:,} words')
+    # pre_corpus length is 313,759,360 words
+    # post_corpus length is 313,753,782 words
 
     # length data:
     corpus = 0
@@ -169,6 +172,8 @@ if __name__ == '__main__':
             corpus += len(line)
     print(f'corpus length is {corpus:,} words')
     print(f'Vocab length is {len(vocab):,} words')
+    # corpus length is 313,753,782 words
+    # Vocab length is 15,358 words
 
     def split_list(lst, n):
         return [lst[i::n] for i in range(n)]
@@ -177,3 +182,4 @@ if __name__ == '__main__':
     for i, dat in enumerate(save_data):
         with open(BASE_DIR / Path(f'data/news.train{i:02}'), 'wb') as fp:
             pickle.dump(dat, fp)
+
