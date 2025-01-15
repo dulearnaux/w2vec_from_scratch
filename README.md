@@ -79,12 +79,6 @@ python train_numpy_model.py \
     --alpha=0.01
 ```
 
-```shell
-python train_numpy_model.py --model_file=sgram.model --data_file=data/toy_data_41mb_raw.txt.train --overwrite_model --type=sgram --window=5 --vector_dim=300 --batch_size=512 --alpha=0.05 --k=15
-```
-
-
-
 ### Negative Sampling Loss Function
 
 ```math
