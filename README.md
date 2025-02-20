@@ -1,13 +1,21 @@
-# Word2Vec from Scratch, using numpy
+# Word2Vec from Scratch, using `numpy`
+
+This repo implements word2vec from scratch, using `numpy`. It does so as described in the [original 2013 word2vec paper](original_papers/Efficient%20Estimation%20of%20Word%20Representations%20in%0AVector%20Space.pdf).
+
+Both Continuous bag of words and s-gram approaches are implemented. And the negative sampling described in the [followup paper](original_papers/Distributed%20Representations%20of%20Words%20and%20Phrases%20(more%20effecient%20follow%20up).pdf) is also implemented for each approach.
+
+If you actually want to use word2vec for yourself, you should probably use a package like Gensim. The purpose of this repo is simply to demonstrate how word2vec works, by using only `numpy` (although `nltk` was used for some basic tokenization tasks).
 
 
+### Data Desciption
 
+The data used was 1 GB of english language news stories.  
 
 ### Run training of models.
 
 As the models trains,
 * the model will get saved periodically (every 10 batches)
-* the loss curve plotted to a file. Monitor the plot so determine when sufficient training is complete.
+* the loss curve plotted to a file. Monitor the plot to determine when sufficient training is completed.
 * at each epoch a checkpoint will be saved. 
 
 #### Continuous Bag of Words
@@ -78,6 +86,8 @@ python train_numpy_model.py \
     --batch_size=512 \
     --alpha=0.01
 ```
+
+## Some of Math for Negative Sampling
 
 ### Negative Sampling Loss Function
 
