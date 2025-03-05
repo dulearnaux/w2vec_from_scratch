@@ -23,7 +23,8 @@ if __name__ == '__main__':
 
     # read in data files
     BASE_DIR = Path(__file__).parent
-    data_files = glob.glob(str(BASE_DIR / Path('data/*train')) + ('[0-9]' * 2))
+    DATA_FOLDER = BASE_DIR / Path('data/processed/thresh_1000')
+    data_files = glob.glob(str(DATA_FOLDER) + '/*train[0-9][0-9]')
     data_files.sort()
     print('Data files identified')
     for data_file in data_files:
@@ -44,6 +45,6 @@ if __name__ == '__main__':
     vocab = w2v.Vocab(train_data)
 
     print('saving file')
-    with open(BASE_DIR / f'vocab.{vocab.size}.pkl', 'wb') as fp:
+    with open(DATA_FOLDER / f'vocab.pkl', 'wb') as fp:
         pickle.dump(vocab, fp)
     print('Saved vocab to vocab.pkl')

@@ -4,9 +4,20 @@ This script cleans the entire corpus of data. About 4Gb.
  - tokenises
  - removes stop words
  - down samples common words according to Mikolov et al.
+ - removes OOV words.
  - saves the processed data.
 """
 from typing import List, Sequence, Tuple
+
+from pathlib import Path
+import pickle
+import os
+from random import shuffle
+
+from unidecode import unidecode
+import string
+from collections import Counter
+from multiprocessing import Pool
 
 import numpy as np
 import numpy.typing as npt
@@ -14,19 +25,11 @@ import numpy.typing as npt
 from nltk.tokenize import word_tokenize
 from nltk.corpus import stopwords
 from nltk.stem.porter import PorterStemmer
-from unidecode import unidecode
-import string
-from collections import Counter
 
-from pathlib import Path
-import pickle
-import os
 
-LOAD_CLEAN = False  # if true, will load saved clean data and not process new.
-LOAD_TRAIN = False  # if true, will load saved training data and not process new.
 BASE_DIR = Path(__file__).parent
 LOW_FREQ_THRESHOLD = 1000  # minimum frequency threshold for words to include in vocab
-STEM_WORDS = True  # To use only word stems set to True
+STEM_WORDS = False  # To use only word stems set to True
 
 
 
@@ -115,21 +118,27 @@ if __name__ == '__main__':
         data_files.append(BASE_DIR / Path("data/raw") / Path(file))
     data_files.sort()
 
-
-    data = []
     # load data, about 4Gb, can do it in-memory
-    for file in data_files:
-        print(f'cleaning {file}')
+    def get_data_from_file(file):
+        toc = time.perf_counter()
+        print(f'cleaning {file}, time={start/60-toc/60:.2f} minutes, ')
         with open(file, 'rt') as fl:
             text = fl.read()
         lines = text.split('\n')
         # Convert to lines of tokens
         clean_lines = [clean_line(line) for line in lines]
         # remove short lines (sentences to short to train on).
-        clean_lines = [line for line in clean_lines if (len(line) >= MIN_SEQUENCE_LENGTH)]
-        data.append(clean_lines)
+        clean_lines = [line for line in clean_lines if
+                       (len(line) >= MIN_SEQUENCE_LENGTH)]
+        return clean_lines
 
-    # get vocab
+    import time
+    start = time.time()
+    N_CORES = os.cpu_count()
+    with Pool(N_CORES-1) as pool:
+        data = pool.map(get_data_from_file, data_files)
+
+    # get vocab. vocab_raw holds {words: freq} pairs.
     vocab_raw = Counter()
     for clean_lines in data:
         sentences = [' '.join(word) for word in clean_lines]
@@ -137,13 +146,24 @@ if __name__ == '__main__':
         freqs = Counter(sentences.split(' '))
         vocab_raw += freqs
 
+    # Print out a summary of vocab size vs LOW_FREQ_THRESHOLD
+    vocab_summary_file = BASE_DIR / Path("data/processed/vocab_summary.txt")
+    if not os.path.exists('data/processed'):
+        os.makedirs('data/processed')
+    os.remove(vocab_summary_file) if os.path.exists(vocab_summary_file) else None
+    for threshold in [0, 10, 100, 1000, 10_000, 100_000]:
+        vocab = Counter({k: c for k, c in vocab_raw.items() if c >= threshold})
+        output = f'Freq Threshold = {threshold:_}, Vocab length = {len(vocab):_}, Corpus length = {sum(vocab.values()):_}'
+        print(output)
+        with open(vocab_summary_file, 'a') as summary:
+            summary.write(output+'\n')
+
+    # Set the vocab for out LOW_FREQ_THRESHOLD
     vocab = Counter({k: c for k, c in vocab_raw.items() if c >= LOW_FREQ_THRESHOLD})
 
     total = sum(vocab.values())
     print(f'Corpus length = {total:,} word instances')
     print(f'Vocab length = {len(vocab):,} words')
-    # Corpus length = 295,895,420 word instances
-    # Vocab length = 15,358 words
     vocab_probs = {k: v / total for k, v in vocab.items()}
 
     # create discard probabilities according to Mikolov et. al. Section 2.3
@@ -153,11 +173,13 @@ if __name__ == '__main__':
 
     pre_corpus = 0
     post_corpus = 0
+    # Subsample words according to vocab_adj_probs
+    # Remove OOV words.
     for i, clean_lines in enumerate(data):
         for j, line in enumerate(clean_lines):
             unifs = np.random.uniform(0, 1, size=len(line))
             pre_corpus += len(line)
-            clean_lines[j] = [word for word, u in zip(line, unifs) if vocab_adj_probs[word] < u]
+            clean_lines[j] = [word for word, u in zip(line, unifs) if vocab_adj_probs[word] < u and word in vocab.keys()]
             post_corpus += len(clean_lines[j])
 
     print(f'pre_corpus length is {pre_corpus:,} words')
@@ -172,14 +194,20 @@ if __name__ == '__main__':
             corpus += len(line)
     print(f'corpus length is {corpus:,} words')
     print(f'Vocab length is {len(vocab):,} words')
-    # corpus length is 313,753,782 words
-    # Vocab length is 15,358 words
 
-    def split_list(lst, n):
+    def split_list(lst, n, to_shuffle=True):
+        if to_shuffle:
+            # Does a full corpus shuffle of news stories. E.g. news story at end
+            # of last file can be in the beginning of the first file now.
+            shuffle(lst)
         return [lst[i::n] for i in range(n)]
 
-    save_data = split_list(data, 10)
+    # Save processed data.
+    # Saves in data/processed/thresh_{threshold} folder
+    save_data = split_list(data, min(100, len(data)))
+    data_save_path = BASE_DIR / Path(f'data/processed/thresh_{LOW_FREQ_THRESHOLD}')
+    if not os.path.exists(data_save_path):
+        os.makedirs(data_save_path)
     for i, dat in enumerate(save_data):
-        with open(BASE_DIR / Path(f'data/news.train{i:02}'), 'wb') as fp:
+        with open(data_save_path / Path(f'news.train{i:02}'), 'wb') as fp:
             pickle.dump(dat, fp)
-
