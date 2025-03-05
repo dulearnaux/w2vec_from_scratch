@@ -7,9 +7,20 @@ Both Continuous bag of words and s-gram approaches are implemented. And the nega
 If you actually want to use word2vec for yourself, you should probably use a package like Gensim. The purpose of this repo is simply to demonstrate how word2vec works, by using only `numpy` (although `nltk` was used for some basic tokenization tasks).
 
 
-### Data Desciption
+### Data Description
 
-The data used was 1 GB of english language news stories.  
+The data used was 4.1 GB of english language news stories stored in 100 files.
+
+This was processed by `clean_raw_data.py`:
+ - punctuation removed
+ - tokenised (into whole english words).
+ - stop words removed (`nltk.corpus.stopwords`)
+ - corpus was down sampled according to Mikolov et. al. 2013, Section 2.3
+ - minimum frequency of words was set to 1000. Low frequency words were discarded from the corpus.
+ - News stories that were less than 10 words long (after the above processing) were removed. 
+
+Went from 4.1GB to 2.8GB of data. Final vocab is 21,927 words.
+
 
 ### Run training of models.
 
