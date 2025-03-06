@@ -21,7 +21,7 @@ def softmax(logits: npt.NDArray) -> npt.NDArray:
 def grouper(iterable, batch_size):
     """Collect data into fixed-length chunks or blocks."""
     args = [iter(iterable)] * batch_size
-    # Note, zip will discard incomplete batches at the end of iterable.
+    # Note, zip will discard incomplete batches at the end of iterator.
     return zip(*args)
 
 
@@ -158,6 +158,8 @@ class Dataloader:
         self.win_pad = int((window - 1) / 2)  # padding on either side of target
         self.idx = self.win_pad  #
         self.line = self.data[self.line_no]
+        # In rare cases the first line is shorter than window.
+        self.short_line_check()
         self.k = negative_samples
         if negative_samples > 0:
             # initialize the noise distribution
@@ -192,11 +194,20 @@ class Dataloader:
             self.line_no += 1
             self.line = self.data[self.line_no]
             # if next line is < window length, need to go to next line.
-            while len(self.line) < self.window:
-                self.line_no += 1
-                self.line = self.data[self.line_no]
+            self.short_line_check()
         else:
             raise StopIteration
+
+    def short_line_check(self):
+        """If line is < window length, need to go to next line."""
+        while len(self.line) < self.window:
+            self.line_no += 1
+            if self.line_no < len(self.data) - 1:
+                self.line = self.data[self.line_no]
+            else:
+                raise StopIteration
+
+
 
     def _init_noise_dist(self):
         """Creates a noise distribution to sample from.
