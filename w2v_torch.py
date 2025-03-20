@@ -9,6 +9,7 @@ import os
 import numpy as np
 import torch.nn as nn
 from torch.utils.data import IterableDataset, DataLoader
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 import torch
 
 import w2v_numpy as w2v
@@ -194,6 +195,7 @@ if __name__ == '__main__':
         vocab = pickle.load(fp)
     dataset = CombinedDataset(data_files, vocab, window, device)
     model = CbowTorch(vocab, embed_dim, alpha, device)
+    scheduler = ReduceLROnPlateau(model.optimizer, mode='min', factor=0.5, patience=10_000, cooldown=1000, threshold=0.01)
 
     # https://github.com/pytorch/pytorch/issues/40403
     # Issue with pytorch, CUDA and multiprocessing. Must use spawn method if
@@ -206,33 +208,41 @@ if __name__ == '__main__':
     else:
         prefetch_factor = None
         fn = None
-    batched_data = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        drop_last=True,
-        num_workers=num_workers,
-        prefetch_factor=prefetch_factor,
-        pin_memory=False,
-        worker_init_fn=fn,
-    )
     start = time.perf_counter()
     batch_start_time = start
-    num_batches = len(batched_data)
-    for batch_counter, (context, target) in enumerate(batched_data):
-        context = context.squeeze().to(device)
-        target = target.squeeze().to(device)
-        model.train_step(x=context, y=target, device=device)
-        print_increment = 100
-        if batch_counter % print_increment == 0 and batch_counter > 0:
-            dur = (time.perf_counter() - start)/60
-            batch_dur = (time.perf_counter() - batch_start_time)
-            batch_start_time = time.perf_counter()  # reset batch timer
-            print(f'batch = {batch_counter} of {num_batches},  '
-                  f'loss = {model.losses[-1]:.5},   \
-                  time:{dur:.5},   '
-                  f'epoch_dur_est = {dur/(batch_counter/num_batches):.5},   '
-                  f'items/s = {(batch_size * print_increment) /batch_dur:.5}')
+    epoch_start_timer = start
+    for epoch in range(3):
+        batched_data = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            drop_last=True,
+            num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
+            pin_memory=False,
+            worker_init_fn=fn,
+        )
+        num_batches = len(batched_data)
+        for batch_counter, (context, target) in enumerate(batched_data):
+            context = context.squeeze().to(device)
+            target = target.squeeze().to(device)
+            model.train_step(x=context, y=target, device=device)
+
+            # Learning Rate Scheduler
+            val_loss = model.losses[-1]
+            scheduler.step(val_loss)
+
+            print_increment = 1000
+            if batch_counter % print_increment == 0 and batch_counter > 0:
+                dur = (time.perf_counter() - start)/60
+                batch_dur = (time.perf_counter() - batch_start_time)
+                batch_start_time = time.perf_counter()  # reset batch timer
+                print(f'epoch = {epoch} of {3},  '
+                      f'batch = {batch_counter} of {num_batches},  '
+                      f'loss = {model.losses[-1]:.5},  '
+                      f'Learning Rate: {model.optimizer.param_groups[0]['lr']:.8},  ' 
+                      f'time:{dur:.1f},  '
+                      f'epoch_dur_est = {dur/(batch_counter/num_batches):.0f},   '
+                      f'items/s = {(batch_size * print_increment) /batch_dur:.0f}')
 
     print('Pytorch Word2vec complete')
-
