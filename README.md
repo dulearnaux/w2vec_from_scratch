@@ -10,7 +10,10 @@ If you actually want to use word2vec for yourself, you should probably use a pac
 ### Data Description
 
 The data used was 4.1 GB of english language news stories stored in 100 files.
-
+ - [description: https://www.statmt.org/lm-benchmark/](https://www.statmt.org/lm-benchmark/)
+ - [download](https://www.statmt.org/lm-benchmark/1-billion-word-language-modeling-benchmark-r13output.tar.gz)
+ - The data was trained on data in the directory: `/1-billion-word-language-modeling-benchmark-r13output/training-monolingual.tokenized.shuffled` 
+ 
 This was processed by `clean_raw_data.py`:
  - punctuation removed
  - tokenised (into whole english words).
